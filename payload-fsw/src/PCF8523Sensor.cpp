@@ -1,13 +1,19 @@
 #include "PCF8523Sensor.h"
 
+#include "PayloadConfig.h"
+
 PCF8523Sensor::PCF8523Sensor() : PCF8523Sensor(0) {}
 
 PCF8523Sensor::PCF8523Sensor(unsigned long minimum_period)
     : Sensor("PCF8523", "PCFTime, ", 1, minimum_period) {}
 
 bool PCF8523Sensor::verify() {
-  if (rtc.begin() == false) return false;
-  // this->rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); //2 minutes early
+  if (rtc.begin(&STRATOCORE_I2C) == false) return false;
+
+  if (rtc.lostPower()) {
+    log_core("PCF8523 lost power (OSF set); set it with S<unix> or wait for CAN");
+  }
+
   rtc.start();
   return true;
 }
@@ -74,4 +80,23 @@ String PCF8523Sensor::decodeToCSV(uint8_t*& packet) {
 
   return String(year) + "/" + String(data[0]) + "/" + String(data[1]) + " " +
          String(data[2]) + ":" + String(data[3]) + ":" + String(data[4]) + ",";
+}
+
+bool PCF8523Sensor::setTime(uint32_t unix_time) {
+  // adjust() also writes Control_3 = 0, which clears the oscillator-stop flag
+  // and enables battery switchover on the PCF8523.
+  rtc.adjust(DateTime((time_t)unix_time));
+  rtc.start();
+
+  int32_t delta = (int32_t)(rtc.now().unixtime() - unix_time);
+  return delta >= -2 && delta <= 2;
+}
+
+uint32_t PCF8523Sensor::nowUnix() { return rtc.now().unixtime(); }
+
+bool PCF8523Sensor::lostPower() { return rtc.lostPower(); }
+
+bool PCF8523Sensor::timeValid() {
+  uint16_t year = rtc.now().year();
+  return year >= 2020 && year <= 2100;
 }

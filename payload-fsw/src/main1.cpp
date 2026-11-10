@@ -19,6 +19,7 @@ void storeData(String data);
 void storeDataPacket(uint8_t* packet);
 
 // include storage headers here
+#if PAYLOAD_ENABLE_SD
 #include "SDStorage.h"
 
 // storage classes
@@ -26,11 +27,18 @@ SDStorage sd_storage;
 
 // storage array
 Storage* storages[] = {&sd_storage};
-
-const int storages_len = sizeof(storages) / sizeof(storages[0]);
+const int storages_len = 1;
+#else
+// No local storage: the PnC logs this board over CAN.
+Storage* storages[] = {nullptr};
+const int storages_len = 0;
+#endif
 
 // Global variables shared with core 0
 extern queue_t qt;
+extern volatile bool sd_summary_request;
+extern volatile bool payload_sd_ok;
+extern volatile uint32_t payload_sd_bytes;
 
 // separate 8k stacks
 bool core1_separate_stack = true;
@@ -41,13 +49,13 @@ bool core1_separate_stack = true;
  *
  */
 void real_setup1() {
-  // while (!Serial);
   delay(500);  // wait for other setup to run
   log_core("Setup1 begin");
 
   // set up heartbeat
   pinMode(HEARTBEAT_PIN_1, OUTPUT);
 
+#if PAYLOAD_ENABLE_SD
   // set storages to be tried forever, with 1 second recovery factor
   for (size_t i = 0; i < storages_len; i++) {
     storages[i]->recoveryConfig(-1, 1000);
@@ -61,6 +69,12 @@ void real_setup1() {
     ErrorDisplay::instance().addCode(Error::CRITICAL_FAIL);
   }
 
+  payload_sd_ok = sd_storage.isOpen();
+#else
+  log_core("Local SD disabled; the PnC logs this board over CAN");
+  payload_sd_ok = false;
+#endif
+
   delay(500);  // wait for other setup to run
   watchdog_enable(8000, true);
 }
@@ -72,12 +86,17 @@ uint8_t received_data[QT_ENTRY_SIZE];
  *
  */
 void real_loop1() {
+  // Feed the watchdog unconditionally. This used to sit inside the "queue has
+  // data" branch, so any stall on core 0 (a slow SD write, a long sensor read,
+  // a serial command that blocks) stopped the feed and rebooted the board
+  // after 8 s even though core 1 was healthy.
+  watchdog_update();
+
   // Block if data is in the queue
   if (queue_get_level(&qt) > 0) {
     // toggle heartbeat
     it2++;
     digitalWrite(HEARTBEAT_PIN_1, (it2 & 0x1));
-    watchdog_update();
 
     log_core("it2: " + String(it2));
 
@@ -93,6 +112,31 @@ void real_loop1() {
 
     // store csv row
     storeDataPacket(received_data);
+  }
+
+#if PAYLOAD_ENABLE_SD
+  // A failed device is retried by the recovery system. Keep the "SD is
+  // healthy" flag and byte count fresh for the core 0 status/CAN heartbeat.
+  // fileSize() flushes, so only sample it about once a second.
+  payload_sd_ok = sd_storage.attemptConnection();
+  static uint32_t last_size_check = 0;
+  if (millis() - last_size_check > 1000) {
+    last_size_check = millis();
+    payload_sd_bytes = sd_storage.fileSize();
+  }
+#endif
+
+  if (sd_summary_request) {
+    sd_summary_request = false;
+#if PAYLOAD_ENABLE_SD
+    if (sd_storage.isOpen()) {
+      sd_storage.printSummary();
+    } else {
+      Serial.println("[PNC] SD not mounted");
+    }
+#else
+    Serial.println("[PNC] local SD disabled (payload logs via PnC)");
+#endif
   }
 
   // Prevent a busy loop
@@ -155,11 +199,6 @@ void storeData(String data) {
  * @param packet Pointer to packet bytes
  */
 void storeDataPacket(uint8_t* packet) {
-  // pull length of packet out
-  uint16_t packet_len;
-  memcpy(&packet_len, packet + sizeof(SYNC_BYTES) + sizeof(uint32_t),
-         sizeof(uint16_t));
-
   for (int i = 0; i < storages_len; i++) {
     if (storages[i]->attemptConnection()) {
       storages[i]->storePacket(packet);

@@ -21,8 +21,17 @@ static uint32_t last_check = 0;
 void watchdog_task() {
   watchdog_enable(WATCHDOG_INTERVAL_MS, true);
 
-  log_task("Watchdog it");
+  // Binary packet mode needs a clean serial stream.
+  if (!pnc_binary_mode) {
+    log_task("Watchdog it");
+  }
   error_display.toggle();
+
+  // Also feed the external ATtiny watchdog from core 1 so a slow SD write or a
+  // cold-boot sensor retry on core 0 does not reset the Pico.
+  static bool ext_heartbeat = false;
+  ext_heartbeat = !ext_heartbeat;
+  digitalWrite(WATCHDOG_HEARTBEAT_PIN, ext_heartbeat);
 
   watchdog_update();
 
@@ -42,8 +51,6 @@ void watchdog_task() {
     }
   }
   mutex_exit(&heartbeats_mutex);
-
-  delay(500);
 }
 
 static bool watchdog_intertask_update_disabled = true;

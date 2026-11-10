@@ -29,6 +29,14 @@ class Sensor {
   virtual void readToSysVar() = 0;
 
   /**
+   * @brief One non-blocking attempt to bring up a sensor that failed verify().
+   *        Used to recover devices that were still booting at power-on.
+   *
+   * @return true if the sensor is now ready
+   */
+  virtual bool retryInit() { return false; }
+
+  /**
    * @brief Returns the sensor name
    *
    * @return String

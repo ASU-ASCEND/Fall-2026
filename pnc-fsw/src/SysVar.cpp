@@ -4,6 +4,8 @@
 
 #define SYSVAR_ACCESS_DELAY 100
 
+volatile bool pnc_binary_mode = false;
+
 // mutex
 static mutex_t sysvar_mutex;
 

@@ -32,17 +32,23 @@ bool TempSensor::verify() {
  *
  * @return String Temperature data in CSV format
  */
-String TempSensor::readData() { return String(analogReadTemp()) + ","; }
+String TempSensor::readData() {
+  this->last_temp_c_ = analogReadTemp();
+  this->has_sample_ = true;
+  return String(this->last_temp_c_) + ",";
+}
 
 void TempSensor::readDataPacket(uint8_t*& packet) {
   // read sensor value
-  float temp = analogReadTemp();
+  this->last_temp_c_ = analogReadTemp();
+  this->has_sample_ = true;
 
   // cast the pointer to that value to a uint8_t pointer, copy the bytes at that
   // pointer to packet
-  std::copy((uint8_t*)(&temp), (uint8_t*)(&temp) + sizeof(temp), packet);
+  std::copy((uint8_t*)(&this->last_temp_c_),
+            (uint8_t*)(&this->last_temp_c_) + sizeof(float), packet);
   // increment the packet pointer past the new bytes
-  packet += sizeof(temp);
+  packet += sizeof(float);
 }
 
 String TempSensor::decodeToCSV(uint8_t*& packet) {

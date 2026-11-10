@@ -35,6 +35,10 @@ class GPSSensor : public Sensor {
   GPSSensor();
   bool verify() override;
   void readToSysVar() override;
+  bool retryInit() override;
+
+ private:
+  bool tryInit();
 };
 
 #endif

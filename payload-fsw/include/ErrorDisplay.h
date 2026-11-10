@@ -37,9 +37,11 @@ class ErrorDisplay {
     mutex_init(&error_display_mutex);
     this->pin_level = 1;
     this->code = NONE;
+#if PAYLOAD_ERROR_LEDS_WIRED
     pinMode(ERROR_PIN_2, OUTPUT);
-    pinMode(ERROR_PIN_1, INPUT);
-    pinMode(ERROR_PIN_0, INPUT);
+    pinMode(ERROR_PIN_1, OUTPUT);
+    pinMode(ERROR_PIN_0, OUTPUT);
+#endif
   }
 
  public:
@@ -52,6 +54,9 @@ class ErrorDisplay {
     static ErrorDisplay only_instance;
     return only_instance;
   }
+
+  /** @brief Current (highest priority) error code. */
+  Error getCode() { return this->code; }
 
   /**
    * @brief Sets the error code to the given value if the given error is of a
@@ -82,10 +87,13 @@ class ErrorDisplay {
 
     if (this->code == Error::NONE) display_code = 0b001;
 
-    // digitalWrite(ERROR_PIN_2, this->pin_level && (display_code & 0b100));
-    // digitalWrite(ERROR_PIN_1, this->pin_level && (display_code & 0b010));
-    // digitalWrite(ERROR_PIN_0, this->pin_level && (display_code & 0b001));
-    digitalWrite(ERROR_PIN_2, this->pin_level);
+#if PAYLOAD_ERROR_LEDS_WIRED
+    digitalWrite(ERROR_PIN_2, this->pin_level && (display_code & 0b100));
+    digitalWrite(ERROR_PIN_1, this->pin_level && (display_code & 0b010));
+    digitalWrite(ERROR_PIN_0, this->pin_level && (display_code & 0b001));
+#else
+    (void)display_code;
+#endif
 
     mutex_exit(&error_display_mutex);
   }

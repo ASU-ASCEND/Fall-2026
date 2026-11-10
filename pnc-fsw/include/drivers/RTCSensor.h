@@ -16,6 +16,15 @@ class RTCSensor : public Sensor {
   RTCSensor();
   bool verify() override;
   void readToSysVar() override;
+
+  /** @brief Set the RTC from a Unix timestamp and clear the oscillator-stop flag. */
+  bool setTime(uint32_t unix_time);
+
+  /** @brief Current RTC time as a Unix timestamp. */
+  uint32_t nowUnix();
+
+  /** @brief True if the PCF8523 lost oscillator power (OSF set). */
+  bool lostPower();
 };
 
 #endif

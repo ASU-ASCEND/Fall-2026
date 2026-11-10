@@ -6,6 +6,10 @@
 #include <drivers/GPSSensor.h>
 #include <drivers/INASensor.h>
 
+// When true the main loop streams raw binary packets on USB serial instead of
+// the human readable CSV line. Toggled at runtime with 'B' / 'T' on serial.
+extern volatile bool pnc_binary_mode;
+
 // setup
 void sysvar_init();
 

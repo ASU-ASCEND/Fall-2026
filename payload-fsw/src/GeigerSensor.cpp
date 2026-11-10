@@ -12,17 +12,20 @@ bool GeigerSensor::verify() {
 }
 
 String GeigerSensor::readData() {
-  return String(this->gc.getCPSRunning()) + "," +
-         String(this->gc.getDoseRunning()) + ",";
+  this->last_cps_ = this->gc.getCPSRunning();
+  this->last_dose_ = this->gc.getDoseRunning();
+  this->has_sample_ = true;
+  return String(this->last_cps_) + "," + String(this->last_dose_) + ",";
 }
 
 void GeigerSensor::readDataPacket(uint8_t*& packet) {
-  float cps = this->gc.getCPSRunning();
-  float dose = this->gc.getDoseRunning();
+  this->last_cps_ = this->gc.getCPSRunning();
+  this->last_dose_ = this->gc.getDoseRunning();
+  this->has_sample_ = true;
 
-  memcpy(packet, &cps, sizeof(float));
+  memcpy(packet, &this->last_cps_, sizeof(float));
   packet += sizeof(float);
-  memcpy(packet, &dose, sizeof(float));
+  memcpy(packet, &this->last_dose_, sizeof(float));
   packet += sizeof(float);
 }
 

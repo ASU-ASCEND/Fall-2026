@@ -20,7 +20,7 @@ BMP390Sensor::BMP390Sensor(unsigned long minium_period, TwoWire* i2c_bus,
     : Sensor("BMP390", "BMP TempC,BMP PresPa,BMP Altm", minium_period) {
   this->i2c_bus = i2c_bus;
   if (this->i2c_bus == &Wire1) this->device_name += "_1";
-  this->i2c_addr = BMP390_DEFAULT_I2C_ADDR;
+  this->i2c_addr = i2c_addr;
 }
 
 /**

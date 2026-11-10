@@ -10,60 +10,35 @@
 void monitor_task() {
   watchdog_intertask_update(WATCHDOG_MONITOR_TASK_ID);
 
-  float pico_temp_c;
-  int8_t res = sysvar_get_pico_temp_c(&pico_temp_c);
+  // Binary packet mode needs a clean serial stream.
+  if (pnc_binary_mode) {
+    return;
+  }
 
-  log_task("Pico Temp: " + String(pico_temp_c) + "(" + String(res) + ")");
+  float pico_temp_c = 0;
+  uint32_t rtc_time = 0;
+  BMESensorData bme_data = {};
+  INASensorData ina_data = {};
+  GPSSensorData gps_data = {};
 
-  uint32_t rtc_time;
-  res = sysvar_get_rtc_time(&rtc_time);
-  log_task("RTC Time: " + String(rtc_time) + "(" + String(res) + ")");
+  sysvar_get_pico_temp_c(&pico_temp_c);
+  sysvar_get_rtc_time(&rtc_time);
+  sysvar_get_bme_data(&bme_data);
+  sysvar_get_ina_data(&ina_data);
+  sysvar_get_gps_data(&gps_data);
 
-  BMESensorData bme_data;
-  res = sysvar_get_bme_data(&bme_data);
-  log_task("BME Temperature: " + String(bme_data.BMETemp) + "(" + String(res) +
-           ")");
-  log_task("BME Pressure: " + String(bme_data.BMEPressure) + "(" + String(res) +
-           ")");
-  log_task("BME Humidity: " + String(bme_data.BMEHumidity) + "(" + String(res) +
-           ")");
-  log_task("BME Gas Sensor: " + String(bme_data.BMEGasResistance) + "(" +
-           String(res) + ")");
-
-  GPSSensorData gps_data;
-  res = sysvar_get_gps_data(&gps_data);
-  log_task("GPS Unix Time: " + String(gps_data.unix_time_s) + "(" +
-           String(res) + ")");
-  log_task("GPS Fix Type: " + String(gps_data.fix_type) + "(" + String(res) +
-           ")");
-  log_task("GPS Fix OK: " + String(gps_data.fix_ok) + "(" + String(res) + ")");
-  log_task("GPS SIV: " + String(gps_data.siv) + "(" + String(res) + ")");
-  log_task("GPS Lat E7: " + String(gps_data.lat_e7) + "(" + String(res) + ")");
-  log_task("GPS Lon E7: " + String(gps_data.lon_e7) + "(" + String(res) + ")");
-  log_task("GPS Alt MSL mm: " + String(gps_data.alt_msl_mm) + "(" +
-           String(res) + ")");
-  log_task("GPS Vel N mmps: " + String(gps_data.vel_n_mmps) + "(" +
-           String(res) + ")");
-  log_task("GPS Vel E mmps: " + String(gps_data.vel_e_mmps) + "(" +
-           String(res) + ")");
-  log_task("GPS Vel D mmps: " + String(gps_data.vel_d_mmps) + "(" +
-           String(res) + ")");
-  log_task("GPS HAcc mm: " + String(gps_data.hacc_mm) + "(" + String(res) +
-           ")");
-  log_task("GPS VAcc mm: " + String(gps_data.vacc_mm) + "(" + String(res) +
-           ")");
-
-  INASensorData ina_data;
-  res = sysvar_get_ina_data(&ina_data);
-  log_task("INA Current: " + String(ina_data.INACurrent) + "(" + String(res) +
-           ")");
-  log_task("INA Bus Voltage: " + String(ina_data.INABusVoltage) + "(" +
-           String(res) + ")");
-  log_task("INA Power: " + String(ina_data.INAPower) + "(" + String(res) + ")");
+  log_task_printf(
+      "MON pico=%.2fC rtc=%lu bme=%.2fC/%luPa/%.2f%%/%luohm "
+      "ina=%.2fmA/%.2fmV/%.2fmW gps=fix%u/ok%u/siv%u lat=%ld lon=%ld alt=%ldmm\n",
+      pico_temp_c, (unsigned long)rtc_time, bme_data.BMETemp,
+      (unsigned long)bme_data.BMEPressure, bme_data.BMEHumidity,
+      (unsigned long)bme_data.BMEGasResistance, ina_data.INACurrent,
+      ina_data.INABusVoltage, ina_data.INAPower, gps_data.fix_type,
+      gps_data.fix_ok, gps_data.siv, gps_data.lat_e7, gps_data.lon_e7,
+      gps_data.alt_msl_mm);
 }
 
 void monitor_task_init() {
   // do task setup
-
-  log_task("monitor Task Started.");
+  log_task("Monitor task started.");
 }
