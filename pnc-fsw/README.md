@@ -32,6 +32,19 @@ I2C addresses: INA260 `0x40`, GPS `0x42`, PCF8523 `0x68`, BME688 `0x76`.
 The SD card is on **SPI1**, not the Pico's default SPI0 pins. The firmware calls
 `SPI1.setRX/setTX/setSCK` and `SD.begin(SD_CS_PIN, SPI1)`.
 
+## SD logging policy
+
+- Packets go to `dataNNNN.bin` (zero-padded). The next index is found with a
+  single `readdir` pass, not one `SD.exists()` call per index.
+- The data file is opened on the first successful packet write, so a boot that
+  never produces data does not leave a 0-byte file behind.
+- At mount the firmware checks free space; below **8 MB** it stops data logging
+  and keeps sensors, CAN and serial running.
+- A mount or write failure is retried at most three times per power cycle, then
+  logging stops. This prevents the old "write fails → remount → new empty file"
+  loop.
+- `PAYLOAD.BIN` appends across boots; its records are self-describing.
+
 ## Build and flash
 
 ```sh
@@ -54,7 +67,7 @@ PKT,<uptime_ms>,<id>,<len>,<pico_c>,<rtc_unix>,<bme_c>,<bme_pa>,<bme_rh>,<bme_oh
 ```
 
 Send `B` to switch to raw 87-byte binary packets (same bytes written to the SD
-card) and `T` to switch back. `D` re-reads the current `dataN.bin` and reports
+card) and `T` to switch back. `D` re-reads the current `dataNNNN.bin` and reports
 packet/checksum counts, `I` rescans I2C, `C` prints the RTC state, `S<unix>`
 sets the RTC (newline terminated), and `R` reboots the board. `K` runs an
 MCP2515 loopback test, `Y` loops a CAN `TIME_SYNC` frame, `L` fragments and

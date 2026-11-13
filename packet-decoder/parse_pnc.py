@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import re
 import struct
 import sys
 from pathlib import Path
@@ -78,9 +79,16 @@ FIELDS = [
     "hacc_mm",
     "vacc_mm",
     "checksum",
+    "session",
 ]
 
 assert PACKET_LEN == 87, PACKET_LEN
+
+
+def natural_key(path: str):
+    """Sort data2.bin before data10.bin instead of lexicographically."""
+    return [int(part) if part.isdigit() else part.lower()
+            for part in re.split(r"(\d+)", path)]
 
 
 def valid(packet: bytes) -> bool:
@@ -123,11 +131,13 @@ def main() -> int:
 
     paths: list[Path] = []
     for pattern in args.files:
-        matches = sorted(glob.glob(pattern))
+        matches = sorted(glob.glob(pattern), key=natural_key)
         paths.extend(Path(p) for p in matches or [pattern])
 
     total = 0
     skipped = 0
+    session = 0
+    last_uptime = None
     if not args.summary and not args.csv:
         print(",".join(FIELDS))
 
@@ -141,7 +151,13 @@ def main() -> int:
         skipped += file_skipped
         if not args.summary:
             for values in packets:
-                print(",".join(str(v) for v in values))
+                # uptime_ms restarts at every boot; a decrease is the reliable
+                # session boundary now that a file may span boots.
+                uptime = values[1]
+                if last_uptime is not None and uptime < last_uptime:
+                    session += 1
+                last_uptime = uptime
+                print(",".join(str(v) for v in (*values, session)))
         else:
             print(f"{path}: {len(packets)} packets, {file_skipped} resyncs")
 

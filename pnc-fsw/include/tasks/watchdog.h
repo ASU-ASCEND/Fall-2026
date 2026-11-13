@@ -10,4 +10,10 @@ void watchdog_task();
 void watchdog_task_init();
 void watchdog_intertask_update(uint8_t id);
 
+// Temporarily stop the RP2350 hardware watchdog while a known-blocking,
+// bounded operation runs (e.g. the RadiaCode BLE connect). Every pause must be
+// paired with a resume.
+void watchdog_pause();
+void watchdog_resume();
+
 #endif

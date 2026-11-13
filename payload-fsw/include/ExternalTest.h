@@ -18,6 +18,7 @@
  *   0x70  SHTC3    command 0xEFC8 -> 0x0807
  *   0x76  BMP390   reg 0x00 -> 0x60   (SDO/SA0 tied to GND)
  *   0x77  BME688   reg 0xD0 -> 0x61   (SDO tied to 3V3)
+ *   0x73  OZONE    no ID register; DFRobot Gravity (SEN0321)
  *   0x74  AS7331   no ID register; A1/A0 straps select 0x74..0x77
  */
 void external_test();

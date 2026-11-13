@@ -34,9 +34,10 @@ uv run --with pyserial python payload_live.py --list
 uv run --with pyserial python payload_live.py --port /dev/cu.usbmodem1101
 ```
 
-The decoder picks the sensor layout from the mask sentinel: 4 sensors
-(temp, IMU, RTC, Geiger) or 5 with the dummy external block used for bench
-bring-up.
+The decoder picks the layout from the mask sentinel and the exact byte count
+(partial packets are normal). The current payload build sends seven sensors:
+temp, IMU, RTC, TMP117, BME688, ENS160, SHTC3. The geiger and dummy-external
+variants remain decodable for older logs.
 
 ## Decode the PnC's payload log
 

@@ -14,15 +14,24 @@ The mask has one sentinel bit on top: for N compiled sensors, the highest set
 bit is bit N, and sensors[i] owns bit (N-1-i). That matches Sensor::getDataPacket
 in payload-fsw.
 
-The default layout is the FA26 Internal (payload) board build::
+The default layout is the FA26 Internal (payload) board with the External
+sensor board on J200::
 
-    sensors[0] PicoTemp    float temp_c                   4 bytes
-    sensors[1] ICM20948    float ax,ay,az,gx,gy,gz,mx,my,mz,temp  40 bytes
-    sensors[2] PCF8523     uint16 year, u8 mon, day, hour, min, sec  7 bytes
-    sensors[3] Geiger      float cps, float dose          8 bytes
+    sensors[0] PicoTemp    float temp_c                                4 bytes
+    sensors[1] ICM20948    float ax,ay,az,gx,gy,gz,mx,my,mz,temp      40 bytes
+    sensors[2] PCF8523     uint16 year, u8 mon, day, hour, min, sec    7 bytes
+    sensors[3] TMP117      float temp_c                                4 bytes
+    sensors[4] BME688      f32 temp, u32 pressure, f32 RH, u32 gas    16 bytes
+    sensors[5] ENS160      u8 aqi, u16 tvoc, u16 eco2                  5 bytes
+    sensors[6] SHTC3       float temp, float RH                        8 bytes
 
-If PAYLOAD_ENABLE_STRATOSENSE is turned on, add the StratoSense entries in the
-same order they appear in payload-fsw/src/main.cpp before decoding those files.
+Optional blocks, in this order after the internal sensors: Geiger (8 bytes,
+PAYLOAD_ENABLE_GEIGER), the three rework-blocked External parts (AS7331 12,
+BMP390 12, Ozone 2), then the 16-float Science placeholder. A sensor that has no
+new data drops its mask bit, so packet length varies within a layout.
+
+The decoder picks both the layout (from the compiled sensor count) and the
+exact byte count (from the mask) automatically.
 
 Usage::
 
@@ -34,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import re
 import struct
 import sys
 from dataclasses import dataclass
@@ -101,11 +111,55 @@ DUMMY_EXTERNAL = SensorLayout(
     tuple(Field(f"dummy_{i}", "f") for i in range(16)),
 )
 
-# The mask sentinel is the compiled sensor count, so a payload built with the
-# dummy external block (5 sensors) and one without it (4) can both be decoded.
-LAYOUTS: dict[int, tuple[SensorLayout, ...]] = {
-    4: INTERNAL_LAYOUT,
-    5: INTERNAL_LAYOUT + (DUMMY_EXTERNAL,),
+# External board (J200): the four devices that pass verification. Order matches
+# payload-fsw/src/main.cpp when PAYLOAD_ENABLE_EXTERNAL is 1.
+EXTERNAL_LAYOUT: tuple[SensorLayout, ...] = (
+    SensorLayout("TMP117", (Field("temp_c", "f", 1.0, "C"),)),
+    SensorLayout(
+        "BME688",
+        (
+            Field("temp_c", "f", 1.0, "C"),
+            Field("pressure_pa", "I", 1.0, "Pa"),
+            Field("humidity_pct", "f", 1.0, "%RH"),
+            Field("gas_ohm", "I", 1.0, "ohm"),
+        ),
+    ),
+    SensorLayout(
+        "ENS160",
+        (
+            Field("aqi", "B"),
+            Field("tvoc_ppb", "H", 1.0, "ppb"),
+            Field("eco2_ppm", "H", 1.0, "ppm"),
+        ),
+    ),
+    SensorLayout(
+        "SHTC3",
+        (
+            Field("temp_c", "f", 1.0, "C"),
+            Field("humidity_pct", "f", 1.0, "%RH"),
+        ),
+    ),
+)
+
+# Geiger is compiled out on this build (PAYLOAD_ENABLE_GEIGER 0 in
+# payload-fsw/include/PayloadConfig.h), so the same sensor count can describe
+# two different packets: {temp, icm, rtc, geiger} or {temp, icm, rtc, dummy}.
+INTERNAL_NO_GEIGER_LAYOUT = tuple(s for s in INTERNAL_LAYOUT if s.name != "Geiger")
+
+# The mask sentinel is the compiled sensor count. Each count maps to every
+# layout that has it; the packet length (with only the mask-set sensors) then
+# picks the one that was built.
+LAYOUTS: dict[int, tuple[tuple[SensorLayout, ...], ...]] = {
+    3: (INTERNAL_NO_GEIGER_LAYOUT,),
+    4: (INTERNAL_LAYOUT, INTERNAL_NO_GEIGER_LAYOUT + (DUMMY_EXTERNAL,)),
+    5: (INTERNAL_LAYOUT + (DUMMY_EXTERNAL,),),
+    # External board data on the wire (default build).
+    7: (INTERNAL_NO_GEIGER_LAYOUT + EXTERNAL_LAYOUT,),
+    8: (
+        INTERNAL_LAYOUT + EXTERNAL_LAYOUT,
+        INTERNAL_NO_GEIGER_LAYOUT + EXTERNAL_LAYOUT + (DUMMY_EXTERNAL,),
+    ),
+    9: (INTERNAL_LAYOUT + EXTERNAL_LAYOUT + (DUMMY_EXTERNAL,),),
 }
 
 
@@ -132,11 +186,31 @@ def decode_packet(packet: bytes) -> dict:
         raise ValueError("bad checksum")
 
     sentinel = mask.bit_length() - 1
-    layout = LAYOUTS.get(sentinel)
-    if layout is None:
+    candidates = LAYOUTS.get(sentinel)
+    if candidates is None:
         raise ValueError(
             f"unknown sensor count {sentinel}; known layouts: "
             f"{sorted(LAYOUTS)}"
+        )
+
+    # Same sensor count, different sensors: match on the packet length. The
+    # mask decides which sensors are present, so a packet where ENS160 had no
+    # new data is shorter than the full layout.
+    def sent_bytes(candidate: tuple[SensorLayout, ...]) -> int:
+        total = HEADER_LEN + 1  # header + checksum
+        for index, sensor in enumerate(candidate):
+            bit = sentinel - 1 - index
+            if mask & (1 << bit):
+                total += sensor.size
+        return total
+
+    layout = next(
+        (candidate for candidate in candidates if sent_bytes(candidate) == len(packet)),
+        None,
+    )
+    if layout is None:
+        raise ValueError(
+            f"no {sentinel}-sensor layout matches a {len(packet)}-byte packet"
         )
 
     out: dict = {"uptime_ms": uptime_ms, "mask": mask, "sensors": {}}
@@ -219,9 +293,38 @@ def fmt_packet(packet: dict) -> str:
                     values["dummy_0"], values["dummy_1"], values["dummy_2"]
                 )
             )
+        elif name == "TMP117":
+            parts.append(f"tmp117={values['temp_c']:.2f}C")
+        elif name == "BME688":
+            parts.append(
+                "bme={:.2f}C {:.0f}Pa {:.1f}%RH {:.0f}ohm".format(
+                    values["temp_c"],
+                    values["pressure_pa"],
+                    values["humidity_pct"],
+                    values["gas_ohm"],
+                )
+            )
+        elif name == "ENS160":
+            parts.append(
+                "aqi={} tvoc={}ppb eco2={}ppm".format(
+                    values["aqi"], values["tvoc_ppb"], values["eco2_ppm"]
+                )
+            )
+        elif name == "SHTC3":
+            parts.append(
+                "shtc3={:.2f}C {:.1f}%RH".format(
+                    values["temp_c"], values["humidity_pct"]
+                )
+            )
         else:
             parts.append(f"{name}={values}")
     return " ".join(parts)
+
+
+def natural_key(path: str):
+    """Sort RAWDATA2.BIN before RAWDATA10.BIN."""
+    return [int(part) if part.isdigit() else part.lower()
+            for part in re.split(r"(\d+)", path)]
 
 
 def main() -> int:
@@ -233,11 +336,13 @@ def main() -> int:
 
     paths: list[Path] = []
     for pattern in args.files:
-        matches = sorted(glob.glob(pattern))
+        matches = sorted(glob.glob(pattern), key=natural_key)
         paths.extend(Path(p) for p in matches or [pattern])
 
     total = 0
     skipped_total = 0
+    session = 0
+    last_uptime = None
     for path in paths:
         try:
             packets, skipped = decode_file(path)
@@ -251,12 +356,17 @@ def main() -> int:
             print(f"{path}: {len(packets)} packets, {skipped} skipped bytes")
         else:
             for packet in packets:
+                uptime = packet["uptime_ms"]
+                if last_uptime is not None and uptime < last_uptime:
+                    session += 1
+                last_uptime = uptime
                 if args.json:
                     import json
 
+                    packet["session"] = session
                     print(json.dumps(packet))
                 else:
-                    print(fmt_packet(packet))
+                    print(f"s={session} {fmt_packet(packet)}")
 
     if args.summary:
         print(f"total: {total} packets, {skipped_total} skipped bytes")

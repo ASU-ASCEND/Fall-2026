@@ -30,7 +30,12 @@ AS7331Sensor::AS7331Sensor(unsigned long minium_period, uint8_t i2c_addr)
  */
 bool AS7331Sensor::verify() {
   STRATOSENSE_I2C.begin();
-  return myUVSensor.begin(this->i2c_addr, STRATOSENSE_I2C);
+  if (!myUVSensor.begin(this->i2c_addr, STRATOSENSE_I2C)) {
+    return false;
+  }
+  // begin() leaves the part in configuration mode; readAllUV() only returns
+  // data in measurement mode. Start continuous conversions.
+  return myUVSensor.prepareMeasurement(MEAS_MODE_CONT, true);
 }
 
 /**

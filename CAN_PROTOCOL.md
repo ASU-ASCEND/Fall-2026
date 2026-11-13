@@ -26,7 +26,7 @@ the fixed IMU fragments described below.
 | ID | Node | Role |
 |---|---|---|
 | 0 | PnC | Time authority, GPS/RTC, radio, SD |
-| 1 | Payload (Internal) | IMU, RTC, Geiger input, SD |
+| 1 | Payload (Internal) | IMU, RTC, External sensors on I2C1, SD |
 | 2 | External | reserved |
 | 3 | Science | reserved |
 | 255 | broadcast | never used as a source |
@@ -148,6 +148,10 @@ Channel numbers:
 Channels 8..31 are free. `float` is fine for every value above; do not put a
 Unix timestamp in a `VALUE` frame because a 32-bit `float` cannot represent
 2026-era seconds precisely. Use `TIME_SYNC` for time.
+
+The payload does not emit `VALUE` frames today: heartbeats, node status and the
+`PACKET` fragments carry everything. Channels 6 and 7 are reserved for the
+Geiger, which is compiled out (`PAYLOAD_ENABLE_GEIGER 0`).
 
 ### `0x200 + node` PACKET (fragmented board packet)
 

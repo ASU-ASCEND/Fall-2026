@@ -32,14 +32,16 @@
 #if PAYLOAD_ENABLE_GEIGER
 #include "GeigerSensor.h"
 #endif
-#if PAYLOAD_ENABLE_STRATOSENSE
-#include "AS7331Sensor.h"
+#if PAYLOAD_ENABLE_EXTERNAL
 #include "BME688Sensor.h"
-#include "BMP390Sensor.h"
 #include "ENS160Sensor.h"
-#include "OzoneSensor.h"
 #include "SHTC3Sensor.h"
 #include "TMP11xSensor.h"
+#endif
+#if PAYLOAD_ENABLE_STRATOSENSE
+#include "AS7331Sensor.h"
+#include "BMP390Sensor.h"
+#include "OzoneSensor.h"
 #endif
 
 // helper function definitions
@@ -76,13 +78,15 @@ GeigerSensor    geiger_sensor     (1000);
 #if PAYLOAD_ENABLE_DUMMY_EXTERNAL
 DummySensor     dummy_ext_sensor  (500, PAYLOAD_DUMMY_EXTERNAL_CHANNELS);
 #endif
-#if PAYLOAD_ENABLE_STRATOSENSE
+#if PAYLOAD_ENABLE_EXTERNAL
 TMP11xSensor    tmp_sensor_out    (500,   &STRATOSENSE_I2C);
 BME688Sensor    bme688_sensor_out (500,   &STRATOSENSE_I2C);
-AS7331Sensor    uv_sensor_out     (500, UV_I2C_ADDR);
 ENS160Sensor    ens160_sensor_out (500,   &STRATOSENSE_I2C, ENS160_ADDRESS_HIGH);
-BMP390Sensor    bmp_sensor_out    (500,   &STRATOSENSE_I2C, BMP390_ALT_I2C_ADDR);
 SHTC3Sensor     shtc3_sensor_out  (500,   &STRATOSENSE_I2C);
+#endif
+#if PAYLOAD_ENABLE_STRATOSENSE
+AS7331Sensor    uv_sensor_out     (500, UV_I2C_ADDR);
+BMP390Sensor    bmp_sensor_out    (500,   &STRATOSENSE_I2C, BMP390_ALT_I2C_ADDR);
 OzoneSensor     ozone_sensor_out  (500,   &STRATOSENSE_I2C);
 #endif
 // clang-format on
@@ -97,17 +101,19 @@ Sensor* sensors[] = {
 #if PAYLOAD_ENABLE_GEIGER
     &geiger_sensor,
 #endif
-#if PAYLOAD_ENABLE_DUMMY_EXTERNAL
-    &dummy_ext_sensor,
-#endif
-#if PAYLOAD_ENABLE_STRATOSENSE
+#if PAYLOAD_ENABLE_EXTERNAL
     &tmp_sensor_out,
     &bme688_sensor_out,
-    &uv_sensor_out,
     &ens160_sensor_out,
-    &bmp_sensor_out,
     &shtc3_sensor_out,
+#endif
+#if PAYLOAD_ENABLE_STRATOSENSE
+    &uv_sensor_out,
+    &bmp_sensor_out,
     &ozone_sensor_out,
+#endif
+#if PAYLOAD_ENABLE_DUMMY_EXTERNAL
+    &dummy_ext_sensor,
 #endif
 };
 // clang-format on
@@ -115,17 +121,21 @@ Sensor* sensors[] = {
 const int sensors_len = sizeof(sensors) / sizeof(sensors[0]);
 
 // Number of sensors that must answer for a healthy boot. PicoTemp always
-// verifies, so on the internal board this expects RTC + IMU + (Geiger input).
+// verifies, so this counts RTC + IMU + the External-board parts that are
+// compiled in.
 const int expected_sensors =
     3
 #if PAYLOAD_ENABLE_GEIGER
     + 1
 #endif
-#if PAYLOAD_ENABLE_DUMMY_EXTERNAL
-    + 1
+#if PAYLOAD_ENABLE_EXTERNAL
+    + 4
 #endif
 #if PAYLOAD_ENABLE_STRATOSENSE
-    + 7
+    + 3
+#endif
+#if PAYLOAD_ENABLE_DUMMY_EXTERNAL
+    + 1
 #endif
     ;
 
@@ -281,6 +291,12 @@ void i2c_scan() {
     log_core_printf("I2C%d scan (SDA=GP%d SCL=GP%d):\n", bus,
                     bus == 0 ? I2C0_SDA_PIN : I2C1_SDA_PIN,
                     bus == 0 ? I2C0_SCL_PIN : I2C1_SCL_PIN);
+    if (bus == 0) {
+      // A dead scan with a line held low points at a bus clamp/short rather
+      // than a missing device. Read-only: do not reconfigure the pins.
+      log_core_printf("I2C0 idle levels: SDA=%d SCL=%d\n",
+                      digitalRead(I2C0_SDA_PIN), digitalRead(I2C0_SCL_PIN));
+    }
     uint8_t found = 0;
     for (uint8_t addr = 1; addr < 127; addr++) {
       wire->beginTransmission(addr);

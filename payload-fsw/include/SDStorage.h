@@ -15,6 +15,8 @@ class SDStorage : public Storage {
   String file_name;
   File file_;
   uint8_t pending_flush_ = 0;
+  bool space_low_ = false;
+  bool open_log();
 #if SD_SPI1
   SPIClassRP2040 sd_spi_1 = SPIClassRP2040(spi1, SD_MISO_PIN, SD_CS_PIN,
                                            SD_SCK_PIN, SD_MOSI_PIN);

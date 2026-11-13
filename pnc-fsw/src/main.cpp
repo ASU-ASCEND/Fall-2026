@@ -23,6 +23,8 @@
 
 // The RadiaCode is not flown on this build. Keep the code in the tree but
 // compiled out; see lib/RadiaCodeBLELib.
+// Bench A/B: the BLE link correlates with the RESET loop, so keep it off until
+// the CYW43/SD interaction is settled. The RadiaCode logs on its own anyway.
 #define PNC_ENABLE_RADIACODE 0
 
 #if PNC_ENABLE_RADIACODE
@@ -32,6 +34,12 @@
 // Print the per-loop task chatter. Off by default so the serial link carries a
 // clean CSV/binary packet stream that packet-decoder/ can actually parse.
 #define PNC_VERBOSE_LOG 0
+
+// Bench A/B for the SD stall: 0 keeps the card unmounted and takes the SD write
+// path out of store_data(), while CAN/sensor logging continues.
+#ifndef PNC_ENABLE_SD
+#define PNC_ENABLE_SD 1
+#endif
 
 PicoTempSensor pico_temp_sensor;
 RTCSensor rtc_sensor;
@@ -48,7 +56,6 @@ bool found_sensors[sensors_len];
 String rc_target_mac = "52:43:06:60:17:DD";
 String rc_filename = "";
 #endif
-
 // declarations
 void sysvar_update();
 void store_data();
@@ -60,6 +67,9 @@ void dump_sd_summary();
 void can_setup();
 void can_service();
 void can_send_time_sync();
+#if PNC_ENABLE_RADIACODE
+void radiacode_service();
+#endif
 
 // The PnC is the mission time authority: it owns the RTC and the GPS, so it
 // broadcasts UTC to the other nodes over CAN.
@@ -147,7 +157,11 @@ void can_on_packet(uint8_t node, const uint8_t* data, uint8_t len) {
 bool sd_status = false;
 String filename = "";
 File data_file;
+bool sd_log_opened = false;
+bool sd_space_low = false;
+uint8_t sd_remounts = 0;
 volatile bool pnc_setup_done = false;
+volatile bool reboot_requested = false;
 
 struct __attribute__((packed)) Packet {
   uint32_t sync_bytes;
@@ -210,20 +224,18 @@ void setup() {
   }
 
   // sd setup
+#if PNC_ENABLE_SD
   sd_setup();
+#endif
 
   // CAN: the MCP2515 shares SPI1 with the card, so bring it up after the bus
   // pins are configured.
   can_setup();
 
 #if PNC_ENABLE_RADIACODE
-  // radiacode setup
+  // radiacode setup. The link itself is opened by radiacode_service() as a
+  // windowed observation, not held open from boot.
   radiacode_ble_init();
-  uint8_t res = radiacode_ble_connect(rc_target_mac, true);
-  if (res != 0) {
-    watchdog_enable(100, true);
-    while (1);  // trigger a reboot
-  }
 #endif
 
   log_task("Setup complete.");
@@ -245,6 +257,48 @@ void i2c_scan() {
   }
 }
 
+/** Zero-padded data file name: data0007.bin. */
+static String sd_data_name(int index) {
+  char suffix[12];
+  snprintf(suffix, sizeof(suffix), "%04d.bin", index);
+  return String("data") + suffix;
+}
+
+/**
+ * @brief Find the highest existing dataNNNN.bin in one directory pass.
+ *
+ * The old code called SD.exists() for 0,1,2,... so mount cost grew with the
+ * file count. One readdir is O(n) and also lets us zero-pad the next name.
+ */
+static int sd_next_data_index() {
+  int max_index = -1;
+  File dir = SD.open("/");
+  if (!dir) return 0;
+
+  for (File entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
+    if (!entry.isDirectory()) {
+      String name = entry.name();
+      int slash = name.lastIndexOf('/');
+      if (slash >= 0) name = name.substring(slash + 1);
+      name.toLowerCase();
+      if (name.startsWith("data") && name.endsWith(".bin")) {
+        String digits = name.substring(4, name.length() - 4);
+        bool all_digits = digits.length() > 0;
+        for (size_t i = 0; i < digits.length(); i++) {
+          if (!isdigit((unsigned char)digits[i])) all_digits = false;
+        }
+        if (all_digits) {
+          int index = digits.toInt();
+          if (index > max_index) max_index = index;
+        }
+      }
+    }
+    entry.close();
+  }
+  dir.close();
+  return max_index + 1;
+}
+
 /**
  * @brief Mount the microSD card.
  *
@@ -255,6 +309,11 @@ void sd_setup() {
   static bool attempted = false;
   static uint32_t last_attempt_ms = 0;
 
+  // A failing card used to unmount and remount every 5 s, minting an empty
+  // dataN.bin each time. Give up after a few tries until the next power cycle.
+  if (sd_remounts >= 3) {
+    return;
+  }
   if (attempted && millis() - last_attempt_ms < 5000) {
     return;  // retry at most every 5 s
   }
@@ -269,6 +328,8 @@ void sd_setup() {
   digitalWrite(SD_CS_PIN, HIGH);
 
   mutex_enter_blocking(&spi1_mutex);
+  if (data_file) data_file.close();
+  sd_log_opened = false;
   if (payload_file) {
     payload_file.close();
     payload_log_ok = false;
@@ -280,23 +341,23 @@ void sd_setup() {
     ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
     log_task("SD mount failed.");
     sd_status = false;
+    sd_remounts++;
     mutex_exit(&spi1_mutex);
     return;
   }
 
   sd_status = true;
-  int num = 0;
-  while (SD.exists("data" + String(num) + ".bin")) num++;
+  // One readdir, not N SD.exists() walks. The file is not created here: it is
+  // opened on the first successful packet write, so a boot with no data does
+  // not leave an empty file behind.
+  filename = sd_data_name(sd_next_data_index());
 
-  filename = "data" + String(num) + ".bin";
-  data_file = SD.open(filename, FILE_WRITE);
-  if (!data_file) {
-    ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
-    sd_status = false;
-    SD.end();
-    mutex_exit(&spi1_mutex);
-    return;
-  }
+  FSInfo fs_info = {};
+  SDFS.info(fs_info);
+  uint64_t total = fs_info.totalBytes;
+  uint64_t used = fs_info.usedBytes;
+  uint64_t free_bytes = (total > used) ? (total - used) : 0;
+  sd_space_low = (total > 0 && free_bytes < 8ULL * 1024ULL * 1024ULL);
 
   // Reassembled packets from the other boards go to their own file. Records
   // are self-describing (magic + length), so appending across boots is safe.
@@ -304,7 +365,8 @@ void sd_setup() {
   payload_log_ok = (bool)payload_file;
   mutex_exit(&spi1_mutex);
 
-  log_task("Saving to " + filename +
+  log_task("Log target: " + filename +
+           (sd_space_low ? " (LOW SPACE, data logging off)" : " (lazy open)") +
            (payload_log_ok ? " (+PAYLOAD.BIN)" : ""));
 }
 
@@ -384,7 +446,14 @@ void can_service() {
     return;
   }
 
-  mutex_enter_blocking(&spi1_mutex);
+  // Core 0 holds this mutex across SD writes, and a slow write (especially
+  // around a RadiaCode BLE sync) can hold it for longer than the 5 s hardware
+  // watchdog. Keep feeding the watchdog while we wait instead of blocking
+  // here unfed.
+  while (!mutex_try_enter(&spi1_mutex, nullptr)) {
+    watchdog_update();
+    delay(1);
+  }
   uint32_t requests_before = can_bus.timeRequestCount();
   can_bus.poll();
 
@@ -413,6 +482,10 @@ void loop() {
   watchdog_intertask_update(WATCHDOG_MAIN_TASK_ID);
   sysvar_update();
   store_data();
+
+#if PNC_ENABLE_RADIACODE
+  radiacode_service();
+#endif
   // CAN is serviced by the fast task on core 1.
 
   // Periodic bring-up status: catches the SD mount / sensor results even if
@@ -425,14 +498,14 @@ void loop() {
       if (found_sensors[i]) sensor_count++;
     }
     uint32_t file_size = 0;
-    if (sd_status) {
+    if (sd_status && data_file) {
       data_file.flush();
       file_size = data_file.size();
     }
     Serial.printf(
         "STATUS sd=%d file=%s bytes=%lu sensors=%d/%d can=%d tx=%lu rx=%lu "
         "busreset=%lu payload_frames=%lu pkt_rx=%lu pkt_drop=%lu pkt_log=%lu "
-        "payload_age=%lu\n",
+        "payload_age=%lu reset=%d wdt=%d\n",
         sd_status, filename.c_str(), (unsigned long)file_size, sensor_count,
         (int)sensors_len, can_ok ? 1 : 0, (unsigned long)can_bus.framesSent(),
         (unsigned long)can_bus.framesReceived(),
@@ -442,7 +515,8 @@ void loop() {
         (unsigned long)can_bus.packetDrops(),
         (unsigned long)payload_packets_logged,
         can_payload_frames ? (unsigned long)(millis() - can_last_payload_ms)
-                           : 0UL);
+                           : 0UL,
+        (int)rp2040.getResetReason(), (int)watchdog_caused_reboot());
     if (can_payload_frames) {
       Serial.printf("PAYLOAD node=%u pkt_len=%u\n", can_payload_node,
                     can_bus.lastPacketLength());
@@ -497,7 +571,10 @@ void handle_serial_commands() {
       case 'r':
         Serial.print("\n[PNC] rebooting\n");
         Serial.flush();
-        watchdog_enable(100, true);
+        // Stop the core 1 watchdog feed first, then arm a 100 ms watchdog
+        // reset; otherwise the 5 ms feed defeats the reboot.
+        reboot_requested = true;
+        watchdog_reboot(0, 0, 100);
         while (1);
         break;
       case 'D':
@@ -582,29 +659,38 @@ void dump_sd_summary() {
   }
 
   mutex_enter_blocking(&spi1_mutex);
-  data_file.flush();
-  uint32_t size = data_file.size();
-  uint32_t packets = size / sizeof(Packet);
+  uint32_t size = 0;
+  uint32_t packets = 0;
   uint32_t valid = 0;
   uint32_t bad = 0;
-  Packet p;
+  if (data_file) {
+    data_file.flush();
+    size = data_file.size();
+    packets = size / sizeof(Packet);
 
-  data_file.seek(0);
-  while (data_file.read((uint8_t*)&p, sizeof(p)) == sizeof(p)) {
-    bool ok = p.sync_bytes == 0xDEADCAFE && p.length == sizeof(Packet);
-    if (ok) {
-      int8_t sum = 0;
-      uint8_t* b = (uint8_t*)&p;
-      for (size_t i = 0; i < sizeof(Packet); i++) sum += b[i];
-      ok = sum == 0;
-    }
-    if (ok) {
-      valid++;
-    } else {
-      bad++;
+    // Read through a separate read-only handle: the logging handle is opened
+    // O_APPEND/O_RDWR and does not reliably seek back for verification.
+    File read_file = SD.open(filename, FILE_READ);
+    if (read_file) {
+      Packet p;
+      read_file.seek(0);
+      while (read_file.read((uint8_t*)&p, sizeof(p)) == sizeof(p)) {
+        bool ok = p.sync_bytes == 0xDEADCAFE && p.length == sizeof(Packet);
+        if (ok) {
+          int8_t sum = 0;
+          uint8_t* b = (uint8_t*)&p;
+          for (size_t i = 0; i < sizeof(Packet); i++) sum += b[i];
+          ok = sum == 0;
+        }
+        if (ok) {
+          valid++;
+        } else {
+          bad++;
+        }
+      }
+      read_file.close();
     }
   }
-  data_file.seek(size);
 
   uint32_t payload_size = 0;
   if (payload_log_ok) {
@@ -639,11 +725,84 @@ void print_packet_csv(const struct Packet& packet) {
       packet.gps_data.vacc_mm, packet.checksum);
 }
 
+#if PNC_ENABLE_RADIACODE
+// The RadiaCode records measurements and events to its own memory (about a
+// thousand hours) as soon as it is powered, with no host involved. Reading
+// VS::DATA_BUF moves those records off the device and deletes them there, so
+// the PnC must never poll it during a flight. All this link does is set the
+// device clock from the PnC's GPS/RTC time authority so the on-device log is
+// stamped against the mission timeline, then release the device again.
+#define RC_FIRST_SYNC_MS 10000UL
+#define RC_SYNC_PERIOD_MS 86400000UL  // re-sync once a day
+#define RC_RETRY_MS 300000UL          // 5 min if the sync itself failed
+#define RC_RETRY_NO_TIME_MS 600000UL  // 10 min if no GPS/RTC time yet
+
+void radiacode_service() {
+  static uint32_t next_ms = RC_FIRST_SYNC_MS;
+
+  if ((int32_t)(millis() - next_ms) < 0) return;
+
+  if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode clock sync");
+  // The BLE scan and GATT discovery block this core. Keep the hardware
+  // watchdog fed across the whole window; the 5 s scan alone used to sit right
+  // on the watchdog edge.
+  watchdog_update();
+
+  // The framework's connect() is a single blocking call we cannot feed from
+  // inside. Pause the 5 s hardware watchdog for this bounded ground-sync
+  // window, then restore it before any other work runs.
+  watchdog_pause();
+  uint8_t connect_rc = radiacode_ble_connect(rc_target_mac, true);
+  watchdog_resume();
+
+  if (connect_rc != 0) {
+    next_ms = millis() + RC_RETRY_MS;
+    if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode connect failed");
+    return;
+  }
+  watchdog_update();
+
+  // GPS fix beats the RTC: it is the only source traceable to UTC.
+  uint32_t unix_s = 0;
+  GPSSensorData gps = {};
+  sysvar_get_rtc_time(&unix_s);
+  sysvar_get_gps_data(&gps);
+  if (gps.fix_type >= 2 && gps.unix_time_s > 1600000000UL) {
+    unix_s = gps.unix_time_s;
+  }
+#ifdef RC_BENCH_UNIX
+  unix_s = (uint32_t)RC_BENCH_UNIX;  // bench build only
+#endif
+  if (unix_s < 1600000000UL) {
+    next_ms = millis() + RC_RETRY_NO_TIME_MS;
+    if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode clock unknown");
+  } else {
+    watchdog_pause();
+    uint8_t set_rc = radiacode_set_time(unix_s);
+    watchdog_resume();
+    if (set_rc == 0) {
+      next_ms = millis() + RC_SYNC_PERIOD_MS;
+      if (!pnc_binary_mode) {
+        Serial.printf("[PNC] RadiaCode clock set to %lu\n",
+                      (unsigned long)unix_s);
+      }
+    } else {
+      next_ms = millis() + RC_RETRY_MS;
+      if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode clock set failed");
+    }
+  }
+
+  // Always drop the link: the device keeps logging on its own, and a live link
+  // is what upsets the SD path on this board.
+  radiacode_ble_disconnect();
+  if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode released");
+}
+#endif
+
 void sysvar_update() {
 #if PNC_VERBOSE_LOG
   log_task("Starting SysVar Update...");
 #endif
-
   static uint32_t last_retry_ms = 0;
   bool retry_now = (millis() - last_retry_ms > 10000);
   if (retry_now) {
@@ -709,24 +868,46 @@ void store_data() {
 
   // Store on SD when available. Do not skip the serial output if the card is
   // missing: bench verification needs the sensor values either way.
+#if PNC_ENABLE_SD
   if (!sd_status) {
     sd_setup();
   }
-  if (sd_status) {
+  if (sd_status && !sd_space_low) {
+    watchdog_update();
     mutex_enter_blocking(&spi1_mutex);
 
-    size_t wrote = data_file.write((uint8_t*)&packet, sizeof(packet));
+    // Lazy open: only a boot that actually produces a packet creates a file.
+    if (!sd_log_opened) {
+      data_file = SD.open(filename, FILE_WRITE);
+      if (data_file) {
+        sd_log_opened = true;
+        log_task("Opened " + filename);
+      } else {
+        ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
+        sd_status = false;
+        sd_remounts++;
+        SD.end();
+      }
+    }
+
+    size_t wrote = 0;
+    if (sd_log_opened) {
+      wrote = data_file.write((uint8_t*)&packet, sizeof(packet));
+    }
     // Keep the file open (open/close per packet hammers FAT metadata and can
-    // stall long enough for the external watchdog), flush about once a second.
+    // stall long enough for the external watchdog), flush about once every 20
+    // packets to avoid partial-sector writes on a slow card.
     static uint8_t pending = 0;
-    if (++pending >= 5) {
+    if (sd_log_opened && ++pending >= 20) {
       pending = 0;
       data_file.flush();
     }
-    if (wrote != sizeof(packet)) {
+    if (sd_log_opened && wrote != sizeof(packet)) {
       ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
       data_file.close();
+      sd_log_opened = false;
       sd_status = false;
+      sd_remounts++;
       SD.end();
     }
 
@@ -734,6 +915,7 @@ void store_data() {
     // PAYLOAD.BIN. Each record is:
     //   uint32 magic "PLOG" | uint32 unix_s | uint32 pnc_uptime_ms |
     //   uint8 node | uint8 length | uint8 data[length]
+    if (sd_log_opened) {
     PayloadRecord record;
     while (queue_try_remove(&payload_queue, &record)) {
       if (!payload_log_ok) {
@@ -759,15 +941,18 @@ void store_data() {
         break;
       }
       static uint8_t payload_pending = 0;
-      if (++payload_pending >= 4) {
+      if (++payload_pending >= 16) {
         payload_pending = 0;
         payload_file.flush();
       }
       payload_packets_logged++;
     }
+    }  // sd_log_opened
 
     mutex_exit(&spi1_mutex);
+    watchdog_update();
   }
+#endif  // PNC_ENABLE_SD
 
   if (pnc_binary_mode) {
     Serial.write((uint8_t*)&packet, sizeof(packet));
@@ -796,6 +981,17 @@ void setup1() {
 }
 
 void loop1() {
+  // A requested reboot must stop the watchdog feed, otherwise the 5 ms update
+  // keeps the chip alive forever.
+  if (reboot_requested) {
+    while (1);
+  }
+
+  // Feed the watchdog before any call that can block on the shared SPI bus.
+  // can_service() waits for core 0's SD writes, so feeding after it is too
+  // late on a slow card.
+  watchdog_update();
+
   // Fast path: drain the MCP2515 before its two RX buffers overflow.
   can_service();
 

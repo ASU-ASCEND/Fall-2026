@@ -1,5 +1,7 @@
 #include "GeigerSensor.h"
 
+#if PAYLOAD_ENABLE_GEIGER
+
 GeigerSensor::GeigerSensor() : GeigerSensor(1000) {}
 
 GeigerSensor::GeigerSensor(unsigned long minimum_period)
@@ -37,3 +39,5 @@ String GeigerSensor::decodeToCSV(uint8_t*& packet) {
   packet += sizeof(float);
   return String(cps) + "," + String(dose) + ",";
 }
+
+#endif  // PAYLOAD_ENABLE_GEIGER

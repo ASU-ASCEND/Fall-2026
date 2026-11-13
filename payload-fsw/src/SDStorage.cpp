@@ -177,6 +177,43 @@ static void sd_print_layout() {
   SPI.endTransaction();
 }
 
+/** Zero-padded capture name: RAWDATA0007.BIN. */
+static String rawdata_name(int index) {
+  char suffix[12];
+  snprintf(suffix, sizeof(suffix), "%04d.BIN", index);
+  return String("RAWDATA") + suffix;
+}
+
+/** Highest existing RAWDATA index in one directory pass. */
+static int next_rawdata_index() {
+  int max_index = -1;
+  File dir = SD.open("/");
+  if (!dir) return 0;
+
+  for (File entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
+    if (!entry.isDirectory()) {
+      String name = entry.name();
+      int slash = name.lastIndexOf('/');
+      if (slash >= 0) name = name.substring(slash + 1);
+      name.toUpperCase();
+      if (name.startsWith("RAWDATA") && name.endsWith(".BIN")) {
+        String digits = name.substring(7, name.length() - 4);
+        bool all_digits = digits.length() > 0;
+        for (size_t i = 0; i < digits.length(); i++) {
+          if (!isdigit((unsigned char)digits[i])) all_digits = false;
+        }
+        if (all_digits) {
+          int index = digits.toInt();
+          if (index > max_index) max_index = index;
+        }
+      }
+    }
+    entry.close();
+  }
+  dir.close();
+  return max_index + 1;
+}
+
 /**
  * @brief Construct a new SDStorage object
  *
@@ -243,12 +280,12 @@ bool SDStorage::verify() {
 
 // find unused file name
 #if STORING_PACKETS
-  // for bin (eventually just have 1 of these)
-  int num = 0;
-  while (SD.exists("RAWDATA" + String(num) + ".BIN")) num++;
+  // Pick the next name in one directory pass; defer opening until the first
+  // packet so a boot that never writes does not leave an empty file.
+  int num = next_rawdata_index();
   if (num != 0) ErrorDisplay::instance().addCode(Error::POWER_CYCLED);
-  this->file_name = "RAWDATA" + String(num) + ".BIN";
-  log_core("Created file: " + this->file_name);
+  this->file_name = rawdata_name(num);
+  log_core("Log target: " + this->file_name + " (lazy open)");
 #else
   int num = 0;
   while (SD.exists("DATA" + String(num) + ".CSV")) num++;
@@ -256,14 +293,33 @@ bool SDStorage::verify() {
   this->file_name = "DATA" + String(num) + ".CSV";
 #endif
 
-  log_core("SD Filename: " + this->file_name);
-
-  // Keep the file open instead of open/close on every packet: the FAT metadata
-  // churn is slow and makes the write path much less predictable.
-  this->file_ = SD.open(this->file_name, FILE_WRITE);
-  if (!this->file_) return false;
+  // Free-space guard: stop logging cleanly instead of write-fail -> remount.
+  FSInfo fs_info = {};
+  SDFS.info(fs_info);
+  uint64_t free_bytes = (fs_info.totalBytes > fs_info.usedBytes)
+                            ? (fs_info.totalBytes - fs_info.usedBytes)
+                            : 0;
+  this->space_low_ = (free_bytes > 0 && free_bytes < 8ULL * 1024ULL * 1024ULL);
+  if (this->space_low_) {
+    log_core("SD free space below 8 MB; data logging disabled");
+    ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
+  }
 
   return true;  // recovery system will handle this now
+}
+
+bool SDStorage::open_log() {
+  if (this->file_) return true;
+  if (this->space_low_) return false;
+  this->file_ = SD.open(this->file_name, FILE_WRITE);
+  if (!this->file_) {
+    log_core("SD open failed: " + this->file_name);
+    ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
+    this->verified = false;
+    return false;
+  }
+  log_core("Opened " + this->file_name);
+  return true;
 }
 
 /**
@@ -272,13 +328,7 @@ bool SDStorage::verify() {
  * @param data Data to store
  */
 void SDStorage::store(String data) {
-  if (!this->file_) {
-    log_core("SD card write failed");
-    ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
-    SD.end();
-    this->verified = false;
-    return;
-  }
+  if (!this->open_log()) return;
 
   this->file_.println(data);
   if (++this->pending_flush_ >= 8) {
@@ -293,13 +343,7 @@ void SDStorage::store(String data) {
  * @param packet Pointer to packet bytes
  */
 void SDStorage::storePacket(uint8_t* packet) {
-  if (!this->file_) {
-    log_core("SD card write failed");
-    ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
-    SD.end();
-    this->verified = false;
-    return;
-  }
+  if (!this->open_log()) return;
 
   // get length from the packet, after sync bytes (4) and sensor presense (4)
   uint16_t packet_len;

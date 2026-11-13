@@ -4,7 +4,7 @@ Tested 2026-11-09 on the bench stack:
 
 - **Power & Control board** (P nC) — supplies `+5V` / `+3V3` / `+1V8` over the
   6-pin Micro-Fit stack cable (`J4` on the PnC → `J100` on the payload).
-- **Internal board** (payload, "FA26 Internal") — Pico 2, PCF8523, ICM-20948,
+- **Internal board** (payload, "FA26 Internal") — Pico 2 W, PCF8523, ICM-20948,
   MCP2515 + TJA1051, microSD, Geiger input.
 - **External sensor board** — plugged into **`J200`** on the Internal board
   (6-pin Micro-Fit, the only external connector that carries `+1V8`).
@@ -25,7 +25,7 @@ reproducible without the PnC except where noted.
 
 | # | Pri | Board · sheet | Refdes / pins / nets | Measured on the bench | Cause | Fix |
 |---|---|---|---|---|---|---|
-| 1 | P0 | Internal · `MicroSD_Slot.SchDoc` | **J400.4** (card VDD) on net **`3V3`**; pull-ups `R400`/`R401`/`R402` 4.7 kΩ; LED `D400` + `R403` 2.2 kΩ | Card answers CMD0 (`0x01`), CMD8 (`R7=000001AA`), CMD55; **never ACMD41**, so it stays in idle | Net `3V3` has **no source**. It holds only C400.1, C401.1, J400.4, R400–R403 and never ties to `+3V3` or `U100.3V3` (both separate nets) | Tie `3V3` → `+3V3` (0 Ω link or net merge). Probe `J400.4`, check `D400` with the card out |
+| 1 | P0 | Internal · `MicroSD_Slot.SchDoc` | **J400.4** (card VDD) on net **`3V3`**; pull-ups `R400`/`R401`/`R402` 4.7 kΩ; LED `D400` + `R403` 2.2 kΩ | Card answers CMD0 (`0x01`), CMD8 (`R7=000001AA`), CMD55; **never ACMD41**, so it stays in idle | Net `3V3` has **no source**. It holds only C400.1, C401.1, J400.4, R400–R403 and never ties to `+3V3` or `U100.3V3` (both separate nets) | **Done 2026-11-13** — `3V3` tied to `+3V3` (bench wire). Probe `J400.4`; re-test with a known-good FAT32 card |
 | 2 | P0 | Internal · `CAN_Transceiver.SchDoc` | **U302.1** TXCAN → `NetU302_1`; **U302.2** RXCAN → `NetU302_2`; **U300.1** TXD → `NetU300_1`; **U300.4** RXD → `NetU300_4` | Both boards pass `K`/`Y`/`L` loopback, but payload `pkt_tx = 0`, PnC `pkt_rx = 0`, nothing on the wire | All four pins are single-pin nets — the controller never reaches the transceiver. PnC does it right (`U8.1 → CAN_TX → U9.1`) | Jumper **U302.1 ↔ U300.1** and **U302.2 ↔ U300.4** (continuity first, unpowered) |
 | 3 | P0 | External · `AS7331.SchDoc` | **U5.3** VDDA on `VDDA+3V3`, fed from `+3V3` through **R16 = 10 kΩ**; `C9` 0.1 µF; VDDD `U5.10` = `+3V3` | No ACK at any address (0x74–0x77); every other part on `+3V3` works | 0.97 mA standby / 1.42 mA active through 10 kΩ → **VDDA ≈ 0 V**; also breaks the VDDA − VDDD ≤ ±0.3 V limit | **R16 → 0 Ω** (or ferrite), keep C9. Probe `U5.3` (expect 3.3 V) |
 | 4 | P1 | External · `AS7331.SchDoc` | **U5.14** A0 = `NetR11_1`: `R11` 10 kΩ↑ to `VDDA+3V3`, `R13` 10 kΩ↓ to AGND. **U5.7** A1 = `NetR10_1`: `R10`↑, `R12`↓ | A0/A1 sit at ~1.65 V, inside the undefined band (V<sub>IL</sub> ≤ 0.99 V, V<sub>IH</sub> ≥ 2.31 V) | Both straps fitted on each pin = resistor divider | Remove **R10 and R11** → A0 = A1 = 0 → **0x74**. Must be done together with item 3 |
@@ -79,8 +79,8 @@ current to finish initialization.
 should be lit; if it is dark, the net has no source. Also check the PCB for a
 net-tie or copper bridge between `3V3` and `+3V3` that the schematic lacks.
 
-**Note:** the mission build logs the payload over CAN and does not use this
-socket, so this does not currently block flight data.
+**Reworked 2026-11-13:** `3V3` is now tied to `+3V3` with a bench wire. The card
+reaches ACMD41 and mounts; `PAYLOAD_ENABLE_SD` is back to 1 with a FAT32 card.
 
 ---
 

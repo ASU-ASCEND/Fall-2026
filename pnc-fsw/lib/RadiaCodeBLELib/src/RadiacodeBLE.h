@@ -11,7 +11,7 @@ uint8_t radiacode_ble_connect(String target_mac, bool verbose);
 void radiacode_ble_disconnect(); 
 
 uint8_t write_request(int command_id, uint8_t* data, size_t len);
-BytesBuffer* read_request(uint32_t command_id);
+uint8_t radiacode_set_time(uint32_t unix_s);BytesBuffer* read_request(uint32_t command_id);
 String decode_cp1251(BytesBuffer* data);
 uint8_t decode_spectrum(BytesBuffer* data, int* ret, float& a0, float& a1,
                         float& a2, uint32_t& ts);
