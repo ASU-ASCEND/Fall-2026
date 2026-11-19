@@ -33,7 +33,7 @@ table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ccc;pad
 </style></head><body><h1>PnC checkout</h1>
 <p id="connection">Connecting...</p><p id="remaining"></p>
 <table><thead><tr><th>Device</th><th>Status</th><th>Reading</th></tr></thead><tbody id="rows"></tbody></table>
-<p><small>Values are unavailable when no successful sample was received in the last 10 seconds. GPS fix is separate from receiver status. RadiaCode clock sync runs after checkout; its own recording is independent.</small></p>
+<p><small>Values are unavailable when no successful sample was received in the last 10 seconds. GPS fix is separate from receiver status.</small></p>
 <script>
 const rows=document.querySelector('#rows'),connection=document.querySelector('#connection');
 function row(name,s,value){return `<tr><td>${name}</td><td class="${s.ok?'good':'bad'}">${s.ok?'Fresh':s.present?'Waiting / stale':'Not detected'}${s.age_ms===null?'':` (${(s.age_ms/1000).toFixed(1)}s)`}</td><td>${s.ok?value:'—'}</td></tr>`}
