@@ -30,8 +30,8 @@ PAYLOAD_ENABLE_GEIGER), the three rework-blocked External parts (AS7331 12,
 BMP390 12, Ozone 2), then the 16-float Science placeholder. A sensor that has no
 new data drops its mask bit, so packet length varies within a layout.
 
-The decoder picks both the layout (from the compiled sensor count) and the
-exact byte count (from the mask) automatically.
+The decoder matches known layouts by sensor count and byte count. Ambiguous
+layouts are rejected rather than silently assigning values to the wrong sensor.
 
 Usage::
 
@@ -141,6 +141,16 @@ EXTERNAL_LAYOUT: tuple[SensorLayout, ...] = (
     ),
 )
 
+STRATOSENSE_LAYOUT = (
+    SensorLayout("AS7331", (
+        Field("uva_uw_cm2", "f"),
+        Field("uvb_uw_cm2", "f"),
+        Field("uvc_uw_cm2", "f"),
+    )),
+    SensorLayout("ReservedBMP390", ()),
+    SensorLayout("Ozone", (Field("ppb", "h"),)),
+)
+
 # Geiger is compiled out on this build (PAYLOAD_ENABLE_GEIGER 0 in
 # payload-fsw/include/PayloadConfig.h), so the same sensor count can describe
 # two different packets: {temp, icm, rtc, geiger} or {temp, icm, rtc, dummy}.
@@ -160,6 +170,8 @@ LAYOUTS: dict[int, tuple[tuple[SensorLayout, ...], ...]] = {
         INTERNAL_NO_GEIGER_LAYOUT + EXTERNAL_LAYOUT + (DUMMY_EXTERNAL,),
     ),
     9: (INTERNAL_LAYOUT + EXTERNAL_LAYOUT + (DUMMY_EXTERNAL,),),
+    10: (INTERNAL_NO_GEIGER_LAYOUT + EXTERNAL_LAYOUT + STRATOSENSE_LAYOUT,),
+    11: (INTERNAL_LAYOUT + EXTERNAL_LAYOUT + STRATOSENSE_LAYOUT,),
 }
 
 
@@ -204,14 +216,20 @@ def decode_packet(packet: bytes) -> dict:
                 total += sensor.size
         return total
 
-    layout = next(
-        (candidate for candidate in candidates if sent_bytes(candidate) == len(packet)),
-        None,
-    )
-    if layout is None:
+    matches = [candidate for candidate in candidates if sent_bytes(candidate) == len(packet)]
+    if not matches:
         raise ValueError(
             f"no {sentinel}-sensor layout matches a {len(packet)}-byte packet"
         )
+    active = lambda candidate: tuple(
+        sensor for index, sensor in enumerate(candidate)
+        if mask & (1 << (sentinel - 1 - index))
+    )
+    if any(active(candidate) != active(matches[0]) for candidate in matches[1:]):
+        raise ValueError("ambiguous sensor layout; build configuration required")
+    layout = matches[0]
+    if any(sensor.name.startswith("Reserved") for sensor in active(layout)):
+        raise ValueError("reserved sensor bit is set")
 
     out: dict = {"uptime_ms": uptime_ms, "mask": mask, "sensors": {}}
     offset = HEADER_LEN
@@ -235,15 +253,19 @@ def decode_file(path: Path) -> tuple[list[dict], int]:
     packets: list[dict] = []
     skipped = 0
     offset = 0
-    while offset + HEADER_LEN <= len(raw):
+    while offset < len(raw):
         if raw[offset : offset + 4] != SYNC:
-            skipped += 1
             nxt = raw.find(SYNC, offset + 1)
             if nxt < 0:
+                skipped += len(raw) - offset
                 break
+            skipped += nxt - offset
             offset = nxt
             continue
 
+        if offset + HEADER_LEN > len(raw):
+            skipped += len(raw) - offset
+            break
         length = struct.unpack_from("<H", raw, offset + 8)[0]
         if length < HEADER_LEN + 1 or offset + length > len(raw):
             skipped += 1
@@ -316,6 +338,14 @@ def fmt_packet(packet: dict) -> str:
                     values["temp_c"], values["humidity_pct"]
                 )
             )
+        elif name == "AS7331":
+            parts.append(
+                "uv={:.3f}/{:.3f}/{:.3f}uW/cm2".format(
+                    values["uva_uw_cm2"], values["uvb_uw_cm2"], values["uvc_uw_cm2"]
+                )
+            )
+        elif name == "Ozone":
+            parts.append(f"ozone={values['ppb']}ppb")
         else:
             parts.append(f"{name}={values}")
     return " ".join(parts)
@@ -341,6 +371,7 @@ def main() -> int:
 
     total = 0
     skipped_total = 0
+    missing_input = False
     session = 0
     last_uptime = None
     for path in paths:
@@ -348,6 +379,7 @@ def main() -> int:
             packets, skipped = decode_file(path)
         except FileNotFoundError:
             print(f"missing: {path}", file=sys.stderr)
+            missing_input = True
             continue
 
         total += len(packets)
@@ -370,7 +402,7 @@ def main() -> int:
 
     if args.summary:
         print(f"total: {total} packets, {skipped_total} skipped bytes")
-    return 0
+    return 1 if missing_input else 0
 
 
 if __name__ == "__main__":

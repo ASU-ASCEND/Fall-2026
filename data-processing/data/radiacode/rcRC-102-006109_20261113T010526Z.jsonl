@@ -1,0 +1,2 @@
+{"kind": "Event", "dt_utc": "2026-11-13T01:03:11.664726+00:00", "event": "CHANGE_DEVICE_PARAMS", "event_param1": 0, "flags": 16448}
+{"kind": "RealTimeData", "dt_utc": "2026-11-13T01:05:25.774726+00:00", "count_rate": 7.515625, "count_rate_err": 4.4, "dose_rate": 9.912109817378223e-06, "dose_rate_err": 15.1, "flags": 16448, "real_time_flags": 0}

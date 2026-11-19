@@ -39,6 +39,9 @@ extern queue_t qt;
 extern volatile bool sd_summary_request;
 extern volatile bool payload_sd_ok;
 extern volatile uint32_t payload_sd_bytes;
+volatile uint32_t payload_sd_packets_written = 0;
+volatile uint32_t payload_sd_packets_dropped = 0;
+static uint32_t sd_unavailable_drops = 0;
 
 // separate 8k stacks
 bool core1_separate_stack = true;
@@ -118,7 +121,9 @@ void real_loop1() {
   // A failed device is retried by the recovery system. Keep the "SD is
   // healthy" flag and byte count fresh for the core 0 status/CAN heartbeat.
   // fileSize() flushes, so only sample it about once a second.
-  payload_sd_ok = sd_storage.attemptConnection();
+  payload_sd_ok = sd_storage.attemptConnection() && sd_storage.isOpen();
+  payload_sd_packets_written = sd_storage.packetsWritten();
+  payload_sd_packets_dropped = sd_unavailable_drops + sd_storage.packetsFailed();
   static uint32_t last_size_check = 0;
   if (millis() - last_size_check > 1000) {
     last_size_check = millis();
@@ -202,6 +207,8 @@ void storeDataPacket(uint8_t* packet) {
   for (int i = 0; i < storages_len; i++) {
     if (storages[i]->attemptConnection()) {
       storages[i]->storePacket(packet);
+    } else {
+      sd_unavailable_drops++;
     }
   }
 }

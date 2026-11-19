@@ -32,7 +32,7 @@ HEADER = struct.Struct("<IIIBB")
 HEADER_LEN = HEADER.size  # 14
 
 
-def records(raw: bytes):
+def records(raw: bytes, diagnostics: dict | None = None):
     offset = 0
     while offset + HEADER_LEN <= len(raw):
         magic, unix_s, uptime_ms, node, length = HEADER.unpack_from(raw, offset)
@@ -40,10 +40,17 @@ def records(raw: bytes):
             offset += 1
             continue
         if offset + HEADER_LEN + length > len(raw):
-            break
+            if diagnostics is not None:
+                diagnostics["truncated_candidates"] += 1
+            offset += 1
+            continue
         data = raw[offset + HEADER_LEN : offset + HEADER_LEN + length]
+        if diagnostics is not None:
+            diagnostics["record_bytes"] += HEADER_LEN + length
         yield unix_s, uptime_ms, node, data
         offset += HEADER_LEN + length
+    if diagnostics is not None:
+        diagnostics["unparsed_bytes"] = len(raw) - diagnostics["record_bytes"]
 
 
 def main() -> int:
@@ -59,8 +66,9 @@ def main() -> int:
     bad = 0
     nodes: dict[int, int] = {}
     raw_out = bytearray()
+    diagnostics = {"truncated_candidates": 0, "record_bytes": 0}
 
-    for unix_s, uptime_ms, node, data in records(raw):
+    for unix_s, uptime_ms, node, data in records(raw, diagnostics):
         count += 1
         nodes[node] = nodes.get(node, 0) + 1
         raw_out.extend(data)
@@ -89,7 +97,8 @@ def main() -> int:
     if args.summary:
         print(
             f"{args.file}: {count} records, {decoded} decoded, {bad} bad, "
-            f"nodes={nodes}"
+            f"nodes={nodes}, {diagnostics['unparsed_bytes']} unparsed bytes, "
+            f"{diagnostics['truncated_candidates']} truncated candidates"
         )
     return 0
 

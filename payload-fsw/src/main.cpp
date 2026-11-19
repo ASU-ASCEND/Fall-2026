@@ -24,11 +24,7 @@
 
 // include sensor headers here
 #include "ICM20948Sensor.h"
-#include "PCF8523Sensor.h"
 #include "TempSensor.h"
-#if PAYLOAD_ENABLE_DUMMY_EXTERNAL
-#include "DummySensor.h"
-#endif
 #if PAYLOAD_ENABLE_GEIGER
 #include "GeigerSensor.h"
 #endif
@@ -40,7 +36,6 @@
 #endif
 #if PAYLOAD_ENABLE_STRATOSENSE
 #include "AS7331Sensor.h"
-#include "BMP390Sensor.h"
 #include "OzoneSensor.h"
 #endif
 
@@ -52,7 +47,6 @@ String readSensorData();
 uint16_t readSensorDataPacket(uint8_t* packet);
 String decodePacket(uint8_t* packet);
 void i2c_scan();
-void rtc_raw_dump();
 void handleSerial();
 void can_setup();
 void can_tick();
@@ -65,18 +59,18 @@ volatile bool sd_summary_request = false;
 // Written by core 1, read by core 0 for the status line and CAN heartbeat.
 volatile bool payload_sd_ok = false;
 volatile uint32_t payload_sd_bytes = 0;
+volatile uint32_t payload_packets_generated = 0;
+volatile uint32_t payload_queue_drops = 0;
+extern volatile uint32_t payload_sd_packets_written;
+extern volatile uint32_t payload_sd_packets_dropped;
 
 // sensor classes
 // clang-format off
 // class        sensor            minimum period in ms
 TempSensor      temp_sensor       (1000);
 ICM20948Sensor  icm_sensor        (0);
-PCF8523Sensor   rtc_sensor        (1000);
 #if PAYLOAD_ENABLE_GEIGER
 GeigerSensor    geiger_sensor     (1000);
-#endif
-#if PAYLOAD_ENABLE_DUMMY_EXTERNAL
-DummySensor     dummy_ext_sensor  (500, PAYLOAD_DUMMY_EXTERNAL_CHANNELS);
 #endif
 #if PAYLOAD_ENABLE_EXTERNAL
 TMP11xSensor    tmp_sensor_out    (500,   &STRATOSENSE_I2C);
@@ -85,9 +79,8 @@ ENS160Sensor    ens160_sensor_out (500,   &STRATOSENSE_I2C, ENS160_ADDRESS_HIGH)
 SHTC3Sensor     shtc3_sensor_out  (500,   &STRATOSENSE_I2C);
 #endif
 #if PAYLOAD_ENABLE_STRATOSENSE
-AS7331Sensor    uv_sensor_out     (500, UV_I2C_ADDR);
-BMP390Sensor    bmp_sensor_out    (500,   &STRATOSENSE_I2C, BMP390_ALT_I2C_ADDR);
-OzoneSensor     ozone_sensor_out  (500,   &STRATOSENSE_I2C);
+AS7331Sensor    uv_sensor_out     (1000, UV_I2C_ADDR, &STRATOCORE_I2C);
+OzoneSensor     ozone_sensor_out  (2000, &STRATOSENSE_I2C);
 #endif
 // clang-format on
 
@@ -97,7 +90,7 @@ OzoneSensor     ozone_sensor_out  (500,   &STRATOSENSE_I2C);
 Sensor* sensors[] = {
     &temp_sensor,
     &icm_sensor,
-    &rtc_sensor,
+    nullptr,  // Reserved RTC packet bit; the RTC is disabled.
 #if PAYLOAD_ENABLE_GEIGER
     &geiger_sensor,
 #endif
@@ -109,11 +102,8 @@ Sensor* sensors[] = {
 #endif
 #if PAYLOAD_ENABLE_STRATOSENSE
     &uv_sensor_out,
-    &bmp_sensor_out,
+    nullptr,  // Reserved BMP390 slot; the device does not respond.
     &ozone_sensor_out,
-#endif
-#if PAYLOAD_ENABLE_DUMMY_EXTERNAL
-    &dummy_ext_sensor,
 #endif
 };
 // clang-format on
@@ -121,10 +111,10 @@ Sensor* sensors[] = {
 const int sensors_len = sizeof(sensors) / sizeof(sensors[0]);
 
 // Number of sensors that must answer for a healthy boot. PicoTemp always
-// verifies, so this counts RTC + IMU + the External-board parts that are
+// verifies, so this counts IMU + the External-board parts that are
 // compiled in.
 const int expected_sensors =
-    3
+    2
 #if PAYLOAD_ENABLE_GEIGER
     + 1
 #endif
@@ -132,10 +122,7 @@ const int expected_sensors =
     + 4
 #endif
 #if PAYLOAD_ENABLE_STRATOSENSE
-    + 3
-#endif
-#if PAYLOAD_ENABLE_DUMMY_EXTERNAL
-    + 1
+    + 2
 #endif
     ;
 
@@ -187,7 +174,7 @@ void setup() {
   // verify sensors
   // recovery config for sensors
   for (int i = 0; i < sensors_len; i++) {
-    sensors[i]->recoveryConfig(5, 1000);
+    if (sensors[i]) sensors[i]->recoveryConfig(5, 1000);
   }
 
   int verified_count = verifySensorRecovery();
@@ -202,7 +189,7 @@ void setup() {
     }
   } else {
     log_core_printf("At least one sensor works (%d/%d), continuing\n",
-                    verified_count, sensors_len);
+                    verified_count, expected_sensors);
     if (verified_count < expected_sensors) {
       ErrorDisplay::instance().addCode(Error::LOW_SENSOR_COUNT);
     }
@@ -241,7 +228,8 @@ void loop() {
   log_data_raw(packet, packet_len);
 
   // send data to core1
-  queue_try_add(&qt, packet);
+  payload_packets_generated++;
+  if (!queue_try_add(&qt, packet)) payload_queue_drops++;
 
   // Forward the complete sample to the PnC. The PnC reassembles it and writes
   // it to its own SD card.
@@ -269,19 +257,20 @@ void loop() {
 int verifySensorRecovery() {
   int count = 0;
   for (int i = 0; i < sensors_len; i++) {
-    if (sensors[i]->attemptConnection()) {
+    if (sensors[i] && sensors[i]->attemptConnection()) {
       count++;
     }
   }
 
   log_core("Sensor Verification Results:");
   for (int i = 0; i < sensors_len; i++) {
+    if (!sensors[i]) continue;
     log_core((sensors[i]->getDeviceName()) + ": " +
              (sensors[i]->getVerified()
                   ? "OK"
                   : "FAIL (check wiring and pin definitions)"));
   }
-  log_core_printf("%d/%d sensors verified\n", count, sensors_len);
+  log_core_printf("%d/%d sensors verified\n", count, expected_sensors);
   return count;
 }
 
@@ -309,21 +298,6 @@ void i2c_scan() {
       log_core("  no devices responded");
     }
   }
-}
-
-void rtc_raw_dump() {
-  Wire.beginTransmission(RTC_I2C_ADDR);
-  Wire.write((uint8_t)0x00);
-  if (Wire.endTransmission(false) != 0) {
-    Serial.println("[PNC] RTC raw: no response");
-    return;
-  }
-  uint8_t n = Wire.requestFrom((int)RTC_I2C_ADDR, 0x13);
-  Serial.printf("[PNC] RTC raw (%u bytes):", n);
-  for (uint8_t i = 0; i < n; i++) {
-    Serial.printf(" %02X", Wire.read());
-  }
-  Serial.println();
 }
 
 /**
@@ -357,7 +331,7 @@ uint16_t readSensorDataPacket(uint8_t* packet) {
   sensor_id = (sensor_id << 1) | 1;
   // rest of the packet
   for (int i = 0; i < sensors_len; i++) {
-    if (sensors[i]->attemptConnection()) {
+    if (sensors[i] && sensors[i]->attemptConnection()) {
       sensors[i]->getDataPacket(sensor_id, temp_packet);
     } else {
       sensor_id <<= 1;
@@ -426,10 +400,11 @@ String decodePacket(uint8_t* packet) {
 
   int curr_offset = id_offset - 1;
   while (curr_offset >= 0) {
-    if (sensor_id & (1 << curr_offset)) {
-      csv_row += sensors[id_offset - curr_offset - 1]->decodeToCSV(temp_packet);
-    } else if (sensors[id_offset - curr_offset - 1]->getVerified()) {
-      csv_row += sensors[id_offset - curr_offset - 1]->readEmpty();
+    Sensor* sensor = sensors[id_offset - curr_offset - 1];
+    if (sensor && (sensor_id & (1 << curr_offset))) {
+      csv_row += sensor->decodeToCSV(temp_packet);
+    } else if (sensor && sensor->getVerified()) {
+      csv_row += sensor->readEmpty();
     }
     curr_offset--;
   }
@@ -453,7 +428,7 @@ String decodePacket(uint8_t* packet) {
 String readSensorData() {
   String csv_row = String(millis()) + ",";
   for (int i = 0; i < sensors_len; i++) {
-    if (sensors[i]->attemptConnection()) {
+    if (sensors[i] && sensors[i]->attemptConnection()) {
       csv_row += sensors[i]->getDataCSV();
     }
   }
@@ -497,8 +472,7 @@ void can_setup() {
  * @brief Send one complete board packet as PACKET fragments.
  *
  * This is the "full data" path: every sensor that made it into the ASU!
- * packet (including the dummy external block for now) is forwarded, not just
- * the hand-picked VALUE channels.
+ * packet is forwarded, not just the hand-picked VALUE channels.
  */
 void can_send_sample(const uint8_t* packet, uint16_t len) {
 #if !PAYLOAD_ENABLE_CAN
@@ -536,16 +510,6 @@ void can_tick() {
 
   can_bus.poll();
 
-  // Adopt the PnC time if the local RTC has no usable time. The PnC has GPS
-  // and is the mission time authority.
-  if (can_bus.hasTime() &&
-      (rtc_sensor.lostPower() || !rtc_sensor.timeValid())) {
-    if (rtc_sensor.setTime(can_bus.utcUnix())) {
-      log_core_printf("RTC set from CAN: %lu\n",
-                      (unsigned long)can_bus.utcUnix());
-    }
-  }
-
   uint32_t now = millis();
   static uint32_t last_heartbeat = 0;
   static uint32_t last_status = 0;
@@ -561,8 +525,7 @@ void can_tick() {
     last_heartbeat = now;
     CanHeartbeat hb;
     hb.node = CAN_NODE_PAYLOAD;
-    hb.state = (uint8_t)((rtc_sensor.getVerified() ? 0x01 : 0) |
-                         (payload_sd_ok ? 0x02 : 0) |
+    hb.state = (uint8_t)((payload_sd_ok ? 0x02 : 0) |
                          (can_bus.hasTime() ? 0x08 : 0));
     hb.seq = heartbeat_seq++;
     hb.uptime_ms = now;
@@ -575,9 +538,9 @@ void can_tick() {
     status.node = CAN_NODE_PAYLOAD;
     status.sensors_ok = 0;
     for (int i = 0; i < sensors_len; i++) {
-      if (sensors[i]->getVerified()) status.sensors_ok++;
+      if (sensors[i] && sensors[i]->getVerified()) status.sensors_ok++;
     }
-    status.sensors_total = (uint8_t)sensors_len;
+    status.sensors_total = (uint8_t)expected_sensors;
     status.error_code = (uint8_t)ErrorDisplay::instance().getCode();
     status.uptime_ms = now;
     can_bus.sendStruct(CAN_ID_NODE_STATUS, status);
@@ -593,27 +556,36 @@ void can_tick() {
 void print_status() {
   int verified = 0;
   for (int i = 0; i < sensors_len; i++) {
-    if (sensors[i]->getVerified()) verified++;
+    if (sensors[i] && sensors[i]->getVerified()) verified++;
   }
 
   log_core_printf(
-      "STATUS sensors=%d/%d sd=%d bytes=%lu can=%d time=%d rtc=%lu lost=%d "
-      "tx=%lu rx=%lu err=%lu pkt_tx=%lu pkt_rx=%lu\n",
-      verified, sensors_len, payload_sd_ok ? 1 : 0,
+      "STATUS sensors=%d/%d sd=%d bytes=%lu can=%d time=%d "
+      "tx=%lu rx=%lu err=%lu pkt_tx=%lu pkt_rx=%lu "
+      "generated=%lu queue_drop=%lu sd_write=%lu sd_drop=%lu\n",
+      verified, expected_sensors, payload_sd_ok ? 1 : 0,
       (unsigned long)payload_sd_bytes, can_ok ? 1 : 0,
-      can_bus.hasTime() ? 1 : 0, (unsigned long)rtc_sensor.nowUnix(),
-      rtc_sensor.lostPower() ? 1 : 0, (unsigned long)can_bus.framesSent(),
+      can_bus.hasTime() ? 1 : 0, (unsigned long)can_bus.framesSent(),
       (unsigned long)can_bus.framesReceived(),
       (unsigned long)(can_bus.sendErrors() + can_bus.readErrors()),
       (unsigned long)can_bus.packetsSent(),
-      (unsigned long)can_bus.packetsReceived());
+      (unsigned long)can_bus.packetsReceived(),
+      (unsigned long)payload_packets_generated,
+      (unsigned long)payload_queue_drops,
+      (unsigned long)payload_sd_packets_written,
+      (unsigned long)payload_sd_packets_dropped);
 
   char mon[160];
-  int n = snprintf(mon, sizeof(mon),
-                   "MON pico=%.2fC icm=%.2fC/%.2fm/s2 rtc=%lu",
-                   temp_sensor.lastTempC(), icm_sensor.lastTempC(),
-                   icm_sensor.lastAccel()[2],
-                   (unsigned long)rtc_sensor.nowUnix());
+  int n = snprintf(mon, sizeof(mon), "MON pico=%.2fC",
+                   temp_sensor.lastTempC());
+  if (n > 0 && n < (int)sizeof(mon)) {
+    if (icm_sensor.getVerified() && icm_sensor.hasLastSample()) {
+      n += snprintf(mon + n, sizeof(mon) - n, " icm=%.2fC/%.2fm/s2",
+                    icm_sensor.lastTempC(), icm_sensor.lastAccel()[2]);
+    } else {
+      n += snprintf(mon + n, sizeof(mon) - n, " icm=unavailable");
+    }
+  }
 #if PAYLOAD_ENABLE_GEIGER
   if (n > 0 && n < (int)sizeof(mon)) {
     snprintf(mon + n, sizeof(mon) - n, " geiger=%.2fcps",
@@ -624,33 +596,8 @@ void print_status() {
 }
 
 void handleSerial() {
-  static bool expect_epoch = false;
-  static String epoch_buf;
-
   while (Serial.available()) {
     char c = (char)Serial.read();
-
-    if (expect_epoch) {
-      if (c >= '0' && c <= '9') {
-        epoch_buf += c;
-        continue;
-      }
-      if (c == '\r' || c == '\n') {
-        if (epoch_buf.length() >= 9) {
-          uint32_t epoch = strtoul(epoch_buf.c_str(), nullptr, 10);
-          if (rtc_sensor.setTime(epoch)) {
-            Serial.printf("[PNC] RTC set to %lu\n", (unsigned long)epoch);
-          } else {
-            Serial.println("[PNC] RTC set failed");
-          }
-        } else {
-          Serial.println("[PNC] usage: S<unix-seconds>");
-        }
-        expect_epoch = false;
-        epoch_buf = "";
-      }
-      continue;
-    }
 
     switch (c) {
       case 'B':
@@ -676,10 +623,7 @@ void handleSerial() {
         break;
       case 'C':
       case 'c':
-        Serial.printf("[PNC] rtc=%lu lost_power=%d valid=%d\n",
-                      (unsigned long)rtc_sensor.nowUnix(),
-                      (int)rtc_sensor.lostPower(),
-                      (int)rtc_sensor.timeValid());
+        Serial.println("[PNC] payload RTC disabled");
         break;
       case 'D':
       case 'd':
@@ -687,7 +631,7 @@ void handleSerial() {
         break;
       case 'X':
       case 'x':
-        rtc_raw_dump();
+        Serial.println("[PNC] payload RTC disabled");
         break;
       case 'K':
       case 'k': {
@@ -738,9 +682,7 @@ void handleSerial() {
         break;
       case 'S':
       case 's':
-        expect_epoch = true;
-        epoch_buf = "";
-        Serial.println("[PNC] send S<unix-seconds> then newline");
+        Serial.println("[PNC] payload RTC disabled");
         break;
       case 'R':
       case 'r':

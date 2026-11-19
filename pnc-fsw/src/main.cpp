@@ -8,10 +8,12 @@
 #include "SysHead.h"
 #include "hardware/watchdog.h"
 #include "pico/multicore.h"
+#include "pico/time.h"
 
 // tasks
 #include "tasks/monitor.h"
 #include "tasks/watchdog.h"
+#include "tasks/checkout.h"
 
 // sensors
 #include "drivers/BMESensor.h"
@@ -21,11 +23,13 @@
 #include "drivers/RTCSensor.h"
 #include "drivers/Sensor.h"
 
-// The RadiaCode is not flown on this build. Keep the code in the tree but
-// compiled out; see lib/RadiaCodeBLELib.
-// Bench A/B: the BLE link correlates with the RESET loop, so keep it off until
-// the CYW43/SD interaction is settled. The RadiaCode logs on its own anyway.
+#ifndef PNC_ENABLE_RADIACODE
+// 0 since 2026-11-19: the RadiaCode clock is synced from a phone (UTC via
+// NTP) as a pre-flight step, so no BLE path is built at all. The CYW43
+// AP->BLE handoff deadlocked btstack after checkout teardown; see
+// LAUNCH_CHECKLIST.md. Flip to 1 only to resume on-device BLE clock sync.
 #define PNC_ENABLE_RADIACODE 0
+#endif
 
 #if PNC_ENABLE_RADIACODE
 #include "RadiacodeBLE.h"
@@ -135,6 +139,7 @@ queue_t payload_queue;
 File payload_file;
 bool payload_log_ok = false;
 volatile uint32_t payload_packets_logged = 0;
+volatile uint32_t payload_queue_drops = 0;
 
 void can_on_packet(uint8_t node, const uint8_t* data, uint8_t len) {
   PayloadRecord record = {};
@@ -147,7 +152,7 @@ void can_on_packet(uint8_t node, const uint8_t* data, uint8_t len) {
   record.length = len;
   memcpy(record.data, data, len);
 
-  queue_try_add(&payload_queue, &record);
+  if (!queue_try_add(&payload_queue, &record)) payload_queue_drops++;
 
   can_payload_frames++;
   can_last_payload_ms = millis();
@@ -159,6 +164,9 @@ String filename = "";
 File data_file;
 bool sd_log_opened = false;
 bool sd_space_low = false;
+bool sd_info_ok = false;
+uint32_t sd_total_mb = 0;
+uint32_t sd_used_mb = 0;
 uint8_t sd_remounts = 0;
 volatile bool pnc_setup_done = false;
 volatile bool reboot_requested = false;
@@ -232,14 +240,9 @@ void setup() {
   // pins are configured.
   can_setup();
 
-#if PNC_ENABLE_RADIACODE
-  // radiacode setup. The link itself is opened by radiacode_service() as a
-  // windowed observation, not held open from boot.
-  radiacode_ble_init();
-#endif
-
   log_task("Setup complete.");
   pnc_setup_done = true;
+  checkout_init();
 }
 
 void i2c_scan() {
@@ -272,12 +275,12 @@ static String sd_data_name(int index) {
  */
 static int sd_next_data_index() {
   int max_index = -1;
-  File dir = SD.open("/");
-  if (!dir) return 0;
+  Dir dir = SDFS.openDir("/");
+  if (!dir.rewind()) return -1;
 
-  for (File entry = dir.openNextFile(); entry; entry = dir.openNextFile()) {
-    if (!entry.isDirectory()) {
-      String name = entry.name();
+  while (dir.next()) {
+    if (dir.isFile()) {
+      String name = dir.fileName();
       int slash = name.lastIndexOf('/');
       if (slash >= 0) name = name.substring(slash + 1);
       name.toLowerCase();
@@ -293,9 +296,7 @@ static int sd_next_data_index() {
         }
       }
     }
-    entry.close();
   }
-  dir.close();
   return max_index + 1;
 }
 
@@ -346,16 +347,27 @@ void sd_setup() {
     return;
   }
 
-  sd_status = true;
   // One readdir, not N SD.exists() walks. The file is not created here: it is
   // opened on the first successful packet write, so a boot with no data does
   // not leave an empty file behind.
-  filename = sd_data_name(sd_next_data_index());
+  int next_index = sd_next_data_index();
+  if (next_index < 0) {
+    log_task("SD root directory open failed");
+    sd_status = false;
+    sd_remounts++;
+    SD.end(false);
+    mutex_exit(&spi1_mutex);
+    return;
+  }
+  filename = sd_data_name(next_index);
+  sd_status = true;
 
   FSInfo fs_info = {};
-  SDFS.info(fs_info);
+  sd_info_ok = SDFS.info(fs_info);
   uint64_t total = fs_info.totalBytes;
   uint64_t used = fs_info.usedBytes;
+  sd_total_mb = (uint32_t)(total / (1024ULL * 1024ULL));
+  sd_used_mb = (uint32_t)(used / (1024ULL * 1024ULL));
   uint64_t free_bytes = (total > used) ? (total - used) : 0;
   sd_space_low = (total > 0 && free_bytes < 8ULL * 1024ULL * 1024ULL);
 
@@ -469,6 +481,10 @@ void can_service() {
 
 static uint8_t it = 0;
 void loop() {
+  CheckoutHealth checkout_health = {{found_sensors[0], found_sensors[1],
+      found_sensors[2], found_sensors[3], found_sensors[4]},
+      sd_status && !sd_space_low, can_ok};
+  checkout_poll(checkout_health);
   handle_serial_commands();
 
   // Feed the external ATtiny85 watchdog.
@@ -484,7 +500,18 @@ void loop() {
   store_data();
 
 #if PNC_ENABLE_RADIACODE
-  radiacode_service();
+  // The CYW43 is shared with Wi-Fi; wait until checkout has shut down.
+  if (millis() >= CHECKOUT_DURATION_MS) {
+    checkout_poll(checkout_health);
+    static bool ble_initialized = false;
+    if (!checkout_is_active()) {
+      if (!ble_initialized) {
+        radiacode_ble_init();
+        ble_initialized = true;
+      }
+      radiacode_service();
+    }
+  }
 #endif
   // CAN is serviced by the fast task on core 1.
 
@@ -498,21 +525,28 @@ void loop() {
       if (found_sensors[i]) sensor_count++;
     }
     uint32_t file_size = 0;
+    mutex_enter_blocking(&spi1_mutex);
     if (sd_status && data_file) {
-      data_file.flush();
       file_size = data_file.size();
     }
+    mutex_exit(&spi1_mutex);
     Serial.printf(
-        "STATUS sd=%d file=%s bytes=%lu sensors=%d/%d can=%d tx=%lu rx=%lu "
-        "busreset=%lu payload_frames=%lu pkt_rx=%lu pkt_drop=%lu pkt_log=%lu "
+        "STATUS sd=%d file=%s bytes=%lu sd_open=%d sd_low=%d sd_info=%d "
+        "sd_total_mb=%lu sd_used_mb=%lu payload_open=%d sd_failures=%u "
+        "sensors=%d/%d can=%d tx=%lu rx=%lu "
+        "busreset=%lu payload_frames=%lu pkt_rx=%lu pkt_drop=%lu queue_drop=%lu pkt_log=%lu "
         "payload_age=%lu reset=%d wdt=%d\n",
-        sd_status, filename.c_str(), (unsigned long)file_size, sensor_count,
+        sd_status, filename.c_str(), (unsigned long)file_size,
+        sd_log_opened ? 1 : 0, sd_space_low ? 1 : 0, sd_info_ok ? 1 : 0,
+        (unsigned long)sd_total_mb, (unsigned long)sd_used_mb,
+        payload_log_ok ? 1 : 0, (unsigned)sd_remounts, sensor_count,
         (int)sensors_len, can_ok ? 1 : 0, (unsigned long)can_bus.framesSent(),
         (unsigned long)can_bus.framesReceived(),
         (unsigned long)can_bus.busResets(),
         (unsigned long)can_payload_frames,
         (unsigned long)can_bus.packetsReceived(),
         (unsigned long)can_bus.packetDrops(),
+        (unsigned long)payload_queue_drops,
         (unsigned long)payload_packets_logged,
         can_payload_frames ? (unsigned long)(millis() - can_last_payload_ms)
                            : 0UL,
@@ -737,23 +771,59 @@ void print_packet_csv(const struct Packet& packet) {
 #define RC_RETRY_MS 300000UL          // 5 min if the sync itself failed
 #define RC_RETRY_NO_TIME_MS 600000UL  // 10 min if no GPS/RTC time yet
 
+namespace {
+// Bounded BLE window: the blocking BLE calls cannot feed the watchdog from
+// inside, and watchdog_pause() has a core-1 re-arm race that got the chip
+// reset mid-connect (wdt=1 in the boot status after a RadiaCode sync).
+// Instead of disarming the watchdog, a hardware alarm keeps it fed every 3 s
+// for up to RC_BLE_WINDOW_MS. Past the deadline the feed stops and the armed
+// watchdog resets the board within its 8 s interval, so a wedged BLE stack
+// costs a clean reboot instead of a frozen board. If the wedge masks
+// interrupts the alarm never runs and the watchdog still fires.
+constexpr uint32_t RC_BLE_WINDOW_MS = 60000;
+volatile uint32_t rc_feed_deadline_ms = 0;
+volatile alarm_id_t rc_feed_alarm = -1;
+
+int64_t rc_wdt_feed_cb(alarm_id_t id, void *user) {
+  (void)id;
+  (void)user;
+  if ((int32_t)(millis() - rc_feed_deadline_ms) >= 0) {
+    rc_feed_alarm = -1;
+    return 0;  // stop feeding: the watchdog reboots the board
+  }
+  watchdog_update();
+  return 3000000;  // re-arm in 3 s
+}
+
+void rc_ble_window_begin() {
+  rc_feed_deadline_ms = millis() + RC_BLE_WINDOW_MS;
+  if (rc_feed_alarm >= 0) cancel_alarm(rc_feed_alarm);
+  rc_feed_alarm = add_alarm_in_ms(3000, rc_wdt_feed_cb, nullptr, true);
+  watchdog_update();
+}
+
+void rc_ble_window_end() {
+  if (rc_feed_alarm >= 0) {
+    cancel_alarm(rc_feed_alarm);
+    rc_feed_alarm = -1;
+  }
+  watchdog_update();
+}
+}  // namespace
+
 void radiacode_service() {
   static uint32_t next_ms = RC_FIRST_SYNC_MS;
 
   if ((int32_t)(millis() - next_ms) < 0) return;
 
   if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode clock sync");
-  // The BLE scan and GATT discovery block this core. Keep the hardware
-  // watchdog fed across the whole window; the 5 s scan alone used to sit right
-  // on the watchdog edge.
-  watchdog_update();
 
   // The framework's connect() is a single blocking call we cannot feed from
-  // inside. Pause the 5 s hardware watchdog for this bounded ground-sync
-  // window, then restore it before any other work runs.
-  watchdog_pause();
+  // inside. Keep the watchdog armed but alarm-fed for this bounded ground
+  // sync window; see rc_ble_window_begin().
+  rc_ble_window_begin();
   uint8_t connect_rc = radiacode_ble_connect(rc_target_mac, true);
-  watchdog_resume();
+  rc_ble_window_end();
 
   if (connect_rc != 0) {
     next_ms = millis() + RC_RETRY_MS;
@@ -777,9 +847,9 @@ void radiacode_service() {
     next_ms = millis() + RC_RETRY_NO_TIME_MS;
     if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode clock unknown");
   } else {
-    watchdog_pause();
+    rc_ble_window_begin();
     uint8_t set_rc = radiacode_set_time(unix_s);
-    watchdog_resume();
+    rc_ble_window_end();
     if (set_rc == 0) {
       next_ms = millis() + RC_SYNC_PERIOD_MS;
       if (!pnc_binary_mode) {
@@ -878,7 +948,11 @@ void store_data() {
 
     // Lazy open: only a boot that actually produces a packet creates a file.
     if (!sd_log_opened) {
-      data_file = SD.open(filename, FILE_WRITE);
+      if (SD.exists(filename)) {
+        log_task("SD target already exists; refusing to append: " + filename);
+      } else {
+        data_file = SD.open(filename, FILE_WRITE);
+      }
       if (data_file) {
         sd_log_opened = true;
         log_task("Opened " + filename);
@@ -886,7 +960,9 @@ void store_data() {
         ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
         sd_status = false;
         sd_remounts++;
-        SD.end();
+        if (payload_file) payload_file.close();
+        payload_log_ok = false;
+        SD.end(false);
       }
     }
 
@@ -908,7 +984,9 @@ void store_data() {
       sd_log_opened = false;
       sd_status = false;
       sd_remounts++;
-      SD.end();
+      if (payload_file) payload_file.close();
+      payload_log_ok = false;
+      SD.end(false);
     }
 
     // Drain packets reassembled by the core 1 CAN task and append them to
@@ -917,10 +995,7 @@ void store_data() {
     //   uint8 node | uint8 length | uint8 data[length]
     if (sd_log_opened) {
     PayloadRecord record;
-    while (queue_try_remove(&payload_queue, &record)) {
-      if (!payload_log_ok) {
-        break;
-      }
+    while (payload_log_ok && queue_try_remove(&payload_queue, &record)) {
       uint8_t buffer[14 + CAN_PACKET_MAX_LEN];
       uint16_t offset = 0;
       const uint32_t magic = 0x474F4C50;  // bytes "PLOG"

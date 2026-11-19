@@ -4,9 +4,29 @@ Firmware for the Fall 2026 PnC board: Raspberry Pi Pico 2W (RP2350) reading the
 onboard INA260, BME688, PCF8523 RTC and the external u-blox NEO-M9N GPS, writing
 binary packets to the microSD card.
 
-The RadiaCode BLE code and the Geiger counter are **not** used on this build.
-The RadiaCode calls are compiled out with `PNC_ENABLE_RADIACODE` in
-`src/main.cpp`; the Geiger input lives on the payload board, not the PnC.
+RadiaCode BLE clock synchronization is enabled by default and begins after the
+checkout Wi-Fi window. The RadiaCode records independently; the PnC does not
+download or delete its observations. The Geiger input is on the payload board.
+
+## Wi-Fi checkout
+
+For the first five minutes after boot, join the open
+`STRATODEVILS-CHECKOUT` network and visit **http://pnc.local/**. If mDNS does
+not resolve, use the access-point IP printed on serial at boot. The network has
+no internet and no password; anyone nearby can see its read-only telemetry.
+
+The page polls `/status` for sensor readings, sample age, GPS fix, SD and CAN
+status. An initialized device with no successful sample in the past ten seconds
+is shown as waiting or stale, not as a valid zero. SD status means mounted and
+not low on space; it does not verify a completed write. CAN status means the
+controller initialized, not that another node is online.
+
+At five minutes of uptime the next checkout service pass stops HTTP, mDNS and
+the access point. Normal sensor, SD and CAN work continues; a blocked main loop
+can delay this shutdown. BLE initialization and the RadiaCode clock-sync
+attempt are deferred until after Wi-Fi shutdown to avoid concurrent radio use.
+The previous BLE/SD reset issue and this transition require a full hardware
+bench test before flight. A reset starts a new five-minute window.
 
 ## Pin map
 

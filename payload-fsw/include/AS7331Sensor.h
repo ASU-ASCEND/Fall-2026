@@ -16,10 +16,12 @@ class AS7331Sensor : public Sensor {
  private:
   SfeAS7331ArdI2C myUVSensor;
   uint8_t i2c_addr;
+  TwoWire* i2c_bus;
 
  public:
-  AS7331Sensor(uint8_t i2c_addr);
-  AS7331Sensor(unsigned long minimum_period, uint8_t i2c_addr);
+  AS7331Sensor(uint8_t i2c_addr, TwoWire* bus = &STRATOSENSE_I2C);
+  AS7331Sensor(unsigned long minimum_period, uint8_t i2c_addr,
+               TwoWire* bus = &STRATOSENSE_I2C);
 
   bool verify() override;
   void readDataPacket(uint8_t*& packet) override;

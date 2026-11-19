@@ -16,6 +16,8 @@ class SDStorage : public Storage {
   File file_;
   uint8_t pending_flush_ = 0;
   bool space_low_ = false;
+  uint32_t packets_written_ = 0;
+  uint32_t packets_failed_ = 0;
   bool open_log();
 #if SD_SPI1
   SPIClassRP2040 sd_spi_1 = SPIClassRP2040(spi1, SD_MISO_PIN, SD_CS_PIN,
@@ -36,6 +38,8 @@ class SDStorage : public Storage {
 
   bool isOpen() const { return (bool)this->file_; }
   uint32_t fileSize();
+  uint32_t packetsWritten() const { return packets_written_; }
+  uint32_t packetsFailed() const { return packets_failed_; }
 };
 
 #endif

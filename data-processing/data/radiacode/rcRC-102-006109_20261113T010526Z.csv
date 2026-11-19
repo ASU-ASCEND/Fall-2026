@@ -1,0 +1,3 @@
+kind,dt_utc,count,count_rate,count_rate_err,dose_rate,dose_rate_err,flags,real_time_flags,duration_s,dose,temperature_c,charge_level,event,event_param1
+Event,2026-11-13T01:03:11.664726+00:00,,,,,,16448,,,,,,CHANGE_DEVICE_PARAMS,0
+RealTimeData,2026-11-13T01:05:25.774726+00:00,,7.515625,4.4,9.912109817378223e-06,15.1,16448,0,,,,,,

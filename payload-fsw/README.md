@@ -72,9 +72,7 @@ packets. `B` switches to packets only, `T` restores verbose output.
 | `I` | I2C scan of both buses |
 | `E` | External board test: scan, raw ID registers, one reading per driver |
 | `W` | External board watch: 20 samples every 3 s (~1 min) |
-| `C` | RTC state (`rtc=`, `lost_power=`, `valid=`) |
-| `S<unix-seconds>\n` | set the RTC |
-| `X` | dump raw PCF8523 registers `0x00..0x12` |
+| `C`, `S`, `X` | report that the payload RTC is disabled |
 | `D` | re-read `RAWDATA NNNN.BIN` and report packet/checksum counts |
 | `K` | MCP2515 loopback self-test |
 | `Y` | CAN `TIME_SYNC` loopback self-test |
@@ -82,15 +80,37 @@ packets. `B` switches to packets only, `T` restores verbose output.
 | `N` | CAN frame/packet counters and last received ID |
 | `R` | reboot |
 
-Set the RTC from the host:
+Commands are case-insensitive, single characters; send them using the
+serial monitor (some monitors require Enter). In verbose
+mode commands print a confirmation; quiet mode suppresses it to
+preserve the binary stream. Commands are handled in the main loop, so responses
+can be delayed while another serial test or sensor operation is running.
+
+### Control from a terminal with tio
+
+Install once on macOS with `brew install tio`. From the repository root,
+identify the payload port after each USB reconnection:
 
 ```sh
-printf 'S%s\n' "$(date +%s)" > /dev/cu.usbmodem1101
+uv run scripts/identify_boards.py
 ```
 
-The PCF8523 coin cell keeps the time across power cycles. `lost_power=0` after
-a power cycle means the cell is working. The firmware also accepts CAN time
-from the PnC if its own RTC is invalid.
+Close other programs using that port, then substitute the reported payload port:
+
+```sh
+tio --no-reconnect -b 115200 /dev/cu.usbmodemXXXX
+```
+
+In tio, type `T` for verbose mode. Keys are sent immediately; don't type full
+words. The payload also
+streams binary packets, so unreadable characters in the terminal are expected.
+Press `Ctrl-T`, then `Q`, to quit tio.
+`--no-reconnect` prevents tio from reconnecting to a port that may be
+reassigned to the other Pico.
+
+The payload RTC is disabled: it is not read, synchronized, or included in
+packets. Payload records still include `millis()` uptime; a PnC CAN log also
+contains the PnC's reception timestamp when available.
 
 ## Packet format
 
@@ -106,27 +126,29 @@ int8     checksum      two's complement, whole frame sums to 0 mod 256
 ```
 
 Current sensor order (`PAYLOAD_ENABLE_EXTERNAL 1`,
-`PAYLOAD_ENABLE_STRATOSENSE 0`, `PAYLOAD_ENABLE_GEIGER 0`,
-`PAYLOAD_ENABLE_DUMMY_EXTERNAL 0`):
+`PAYLOAD_ENABLE_STRATOSENSE 1`, `PAYLOAD_ENABLE_GEIGER 0`,
+with synthetic sensor generators removed):
 
 | Index | Sensor | Payload bytes |
 |---|---|---|
 | 0 | PicoTemp | float °C (4) |
 | 1 | ICM20948 | 10 × float: ax, ay, az, gx, gy, gz, mx, my, mz, temp (40) |
-| 2 | PCF8523 | uint16 year + month, day, hour, minute, second (7) |
+| 2 | Reserved (PCF8523 disabled) | absent; mask bit remains clear |
 | 3 | TMP117 | float °C (4) |
 | 4 | BME688 | float temp, uint32 pressure, float RH, uint32 gas resistance (16) |
 | 5 | ENS160 | uint8 AQI, uint16 TVOC, uint16 eCO2 (5) |
 | 6 | SHTC3 | float temp, float RH (8) |
+| 7 | AS7331 on I2C0 | float UVA, UVB, UVC in µW/cm² (12) |
+| 8 | Reserved (BMP390 unavailable) | absent; mask bit remains clear |
+| 9 | Ozone on I2C1 | signed int16 concentration in ppb (2) |
 
 Indexes 3–6 are the External board on `J200`/I2C1. `Geiger` (8 bytes) sits
 right after the RTC when `PAYLOAD_ENABLE_GEIGER 1`; it is compiled out. The
-AS7331, BMP390 and ozone sensor (`PAYLOAD_ENABLE_STRATOSENSE 1`) append after
-the four working ones once the R16/address-rework items in `HARDWARE_DEBUG.md`
-are done, and the 16-float dummy block goes last if enabled.
+AS7331 and ozone append after the four external sensors. The nonresponding
+BMP390 slot remains reserved.
 
 Each sensor has its own minimum period, so a packet only carries a sensor when
-that sensor produced new data; the mask says which. A full packet is 99 bytes,
+that sensor produced new data; the mask says which. A full packet is 106 bytes,
 and an ENS160 or BME688 that has no fresh reading drops 5 or 16 bytes from that.
 The decoder picks the layout from the mask sentinel and the byte count.
 
@@ -150,26 +172,23 @@ The PnC reassembles the packets and logs them to `PAYLOAD.BIN`.
 `K`, `Y` and `L` prove the controller, the time protocol and the
 fragmentation/reassembly path without a second node.
 
-For bench bring-up with the sensors unavailable, `PAYLOAD_DUMMY_IMU` makes the
-IMU driver emit synthetic values and `PAYLOAD_ENABLE_DUMMY_EXTERNAL` adds a
-16-float Science placeholder. The dummy block is off by default now that the
-four working External-board sensors are in the packet.
+Synthetic IMU and external placeholder generators have been removed. A failed
+IMU is omitted from packets and reported as unavailable.
 
 ## Bench status (Fall 2026 bring-up)
 
 Verified on the connected board:
 
 - Pico temperature: works, ~22 °C.
-- PCF8523 RTC: works after `S<unix>`; `lost_power=0` after a reboot.
+- PCF8523 RTC: disabled after captured timestamps were found invalid and frozen.
 - Geiger input: compiled out (`PAYLOAD_ENABLE_GEIGER 0`, MightyOhm library
   excluded), so it contributes no bytes to the packet. Re-enable only if a tube
   is fitted.
 - MCP2515: `K`, `Y` and `L` all PASS.
 - I2C0 scan: `0x68` responds (RTC).
 - I2C1 scan with the external board attached: `0x48 0x53 0x70 0x77`.
-- External board data is in the packet: TMP117, BME688, ENS160 and SHTC3. The
-  AS7331, BMP390 and ozone sensor stay behind `PAYLOAD_ENABLE_STRATOSENSE 0`
-  until the rework in `HARDWARE_DEBUG.md` is done.
+- TMP117, BME688, ENS160, SHTC3, I2C0 AS7331 and I2C1 ozone are in the
+  packet. BMP390 remains absent. UV response still needs a UV source test.
 - Local SD is enabled (`PAYLOAD_ENABLE_SD 1`) after the 2026-11-13 `3V3` →
   `+3V3` rework. A fresh FAT32 card reaches ACMD41 and mounts; logs go to
   `RAWDATA NNNN.BIN` using the lazy-open storage path.
@@ -213,9 +232,8 @@ Two failures are schematic defects, not firmware:
    consecutive reads while the temperature ADC changes normally. That points at
    the part (`U2`), not the bus.
 
-Only four of the six external devices are usable today, so
-`PAYLOAD_ENABLE_STRATOSENSE` stays off and the dummy block remains in the
-packet.
+The separately connected UV and ozone devices are included in the current
+packet; the older external-board UV part and BMP390 remain unverified.
 
 The USB device path can swap between the two Pico boards. The payload is the
 one whose `I2C0` sees only `0x68` and which prints `ASU!` packets; the PnC sees

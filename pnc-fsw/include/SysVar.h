@@ -13,6 +13,12 @@ extern volatile bool pnc_binary_mode;
 // setup
 void sysvar_init();
 
+struct SysVarFreshness {
+  uint32_t pico_ms, rtc_ms, ina_ms, bme_ms, gps_ms;
+  uint8_t valid;
+};
+int8_t sysvar_get_freshness(SysVarFreshness* output);
+
 // Access functions
 int8_t sysvar_get_pico_temp_c(float* output);
 int8_t sysvar_set_pico_temp_c(float input);

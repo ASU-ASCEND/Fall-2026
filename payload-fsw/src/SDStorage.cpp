@@ -316,6 +316,9 @@ bool SDStorage::open_log() {
     log_core("SD open failed: " + this->file_name);
     ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
     this->verified = false;
+    // SDFS.begin() returns immediately while its mounted flag is set. Clear
+    // that flag so the next recovery attempt actually initializes the card.
+    SD.end(false);
     return false;
   }
   log_core("Opened " + this->file_name);
@@ -343,7 +346,10 @@ void SDStorage::store(String data) {
  * @param packet Pointer to packet bytes
  */
 void SDStorage::storePacket(uint8_t* packet) {
-  if (!this->open_log()) return;
+  if (!this->open_log()) {
+    packets_failed_++;
+    return;
+  }
 
   // get length from the packet, after sync bytes (4) and sensor presense (4)
   uint16_t packet_len;
@@ -357,8 +363,13 @@ void SDStorage::storePacket(uint8_t* packet) {
       this->file_.close();
       SD.end();
       this->verified = false;
+      packets_failed_++;
       return;
     }
+    packets_written_++;
+  } else {
+    packets_failed_++;
+    return;
   }
 
   if (++this->pending_flush_ >= 8) {

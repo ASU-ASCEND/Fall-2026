@@ -115,7 +115,9 @@
 
 // multicore transfer queue
 #define QT_ENTRY_SIZE 500
-#define QT_MAX_SIZE 10
+// Keep startup samples while FAT32 free-space enumeration initializes storage.
+// Drops remain counted if a slow or unavailable card outlasts this buffer.
+#define QT_MAX_SIZE 64
 
 // packet properties
 const uint8_t SYNC_BYTES[] = {'A', 'S', 'U', '!'};
@@ -141,14 +143,11 @@ const uint8_t SYNC_BYTES[] = {'A', 'S', 'U', '!'};
 #endif
 
 /**
- * @brief The remaining External-board devices, blocked on hardware rework.
- *
- * AS7331 (VDDA through R16 10 kOhm, A0/A1 mid-rail), BMP390 (not fitted) and
- * the ozone sensor. Leave at 0 until HARDWARE_DEBUG.md items 3, 4 and 6 are
- * done; their verify() fails and they add no usable bytes.
+ * @brief Connected AS7331 on I2C0 and ozone sensor on I2C1.
+ * The nonresponding BMP390 has a reserved packet slot but is not enabled.
  */
 #ifndef PAYLOAD_ENABLE_STRATOSENSE
-#define PAYLOAD_ENABLE_STRATOSENSE 0
+#define PAYLOAD_ENABLE_STRATOSENSE 1
 #endif
 
 #ifndef PAYLOAD_ENABLE_CAN
@@ -169,28 +168,6 @@ const uint8_t SYNC_BYTES[] = {'A', 'S', 'U', '!'};
 #ifndef PAYLOAD_ENABLE_ICM20948
 #define PAYLOAD_ENABLE_ICM20948 1
 #endif
-
-/**
- * @brief Synthetic data for bench bring-up.
- *
- * PAYLOAD_DUMMY_IMU makes the ICM driver report plausible accel/gyro/mag
- * values when the real IMU is not usable, so the CAN packet path carries the
- * same 40-byte block it will in flight.
- *
- * PAYLOAD_ENABLE_DUMMY_EXTERNAL adds a 16-float placeholder for the Science
- * board. Off by default now that the four working External-board sensors are in
- * the packet; turn it on for bench tests that need the old ~138-byte packet.
- */
-#ifndef PAYLOAD_DUMMY_IMU
-#define PAYLOAD_DUMMY_IMU 1
-#endif
-
-#ifndef PAYLOAD_ENABLE_DUMMY_EXTERNAL
-#define PAYLOAD_ENABLE_DUMMY_EXTERNAL 0
-#endif
-
-/** @brief Number of float channels the dummy external block emits. */
-#define PAYLOAD_DUMMY_EXTERNAL_CHANNELS 16
 
 /**
  * @brief Local SD logging on the payload board.
