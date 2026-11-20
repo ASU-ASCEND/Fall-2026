@@ -39,7 +39,7 @@ const rows=document.querySelector('#rows'),connection=document.querySelector('#c
 function row(name,s,value){return `<tr><td>${name}</td><td class="${s.ok?'good':'bad'}">${s.ok?'Fresh':s.present?'Waiting / stale':'Not detected'}${s.age_ms===null?'':` (${(s.age_ms/1000).toFixed(1)}s)`}</td><td>${s.ok?value:'—'}</td></tr>`}
 async function update(){try{let r=await fetch('/status',{cache:'no-store'});if(!r.ok)throw Error();let d=await r.json();
 connection.textContent='Connected';connection.className='good';
-document.querySelector('#remaining').textContent=`Wi-Fi closes in ${Math.ceil(d.remaining_ms/1000)} seconds (two minutes after boot).`;
+document.querySelector('#remaining').textContent=`Wi-Fi closes in ${Math.ceil(d.remaining_ms/1000)} seconds (five minutes after boot).`;
 rows.innerHTML=row('Pico temperature',d.pico,`${d.pico.c} °C`)+
 row('RTC',d.rtc,`${d.rtc.unix} Unix seconds`)+
 row('BME688',d.bme,`${d.bme.c} °C / ${d.bme.pa} Pa / ${d.bme.rh} % / ${d.bme.ohm} Ω`)+
