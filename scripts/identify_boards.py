@@ -59,7 +59,7 @@ def valid_pnc_packet(data: bytes) -> bool:
 
 def classify(data: bytes) -> tuple[str, list[str]]:
     evidence = []
-    if re.search(rb"\bPKT,\d+,\d+,87,", data):
+    if re.search(rb"\bPKT,\d+,\d+,87,", data) or re.search(rb"DATA pnc ", data):
         evidence.append("PnC text packet")
     if re.search(rb"STATUS sd=[01] file=", data):
         evidence.append("PnC status")

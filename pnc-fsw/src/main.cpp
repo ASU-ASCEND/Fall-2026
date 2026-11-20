@@ -5,6 +5,7 @@
 
 #include "CanBus.h"
 #include "ErrorDisplay.h"
+#include "PayloadTelemetry.h"
 #include "SysHead.h"
 #include "hardware/watchdog.h"
 #include "pico/multicore.h"
@@ -65,7 +66,7 @@ void sysvar_update();
 void store_data();
 void sd_setup();
 void i2c_scan();
-void print_packet_csv(const struct Packet& packet);
+void print_data_line();
 void handle_serial_commands();
 void dump_sd_summary();
 void can_setup();
@@ -136,8 +137,6 @@ struct __attribute__((packed)) PayloadRecord {
 };
 
 queue_t payload_queue;
-File payload_file;
-bool payload_log_ok = false;
 volatile uint32_t payload_packets_logged = 0;
 volatile uint32_t payload_queue_drops = 0;
 
@@ -153,6 +152,11 @@ void can_on_packet(uint8_t node, const uint8_t* data, uint8_t len) {
   memcpy(record.data, data, len);
 
   if (!queue_try_add(&payload_queue, &record)) payload_queue_drops++;
+
+  // Keep a decoded copy for the checkout page. Note this also sees the
+  // synthetic packets of the CAN loopback self-tests (serial 'L'); those
+  // fail validation and only bump frames_seen.
+  payload_telemetry_ingest(node, data, len);
 
   can_payload_frames++;
   can_last_payload_ms = millis();
@@ -170,6 +174,20 @@ uint32_t sd_used_mb = 0;
 uint8_t sd_remounts = 0;
 volatile bool pnc_setup_done = false;
 volatile bool reboot_requested = false;
+
+// Declared in tasks/checkout.h; called from the checkout task. Appends one
+// line to CHECKOUT.LOG so the AP/HTTP session can be reconstructed after a
+// battery-powered checkout with no USB attached.
+void pnc_event_log(const char* line) {
+  if (!sd_status || sd_space_low) return;
+  mutex_enter_blocking(&spi1_mutex);
+  File f = SD.open("CHECKOUT.LOG", FILE_WRITE);
+  if (f) {
+    f.printf("%lu %s\n", (unsigned long)millis(), line);
+    f.close();  // close flushes: the stack may be powered off right after
+  }
+  mutex_exit(&spi1_mutex);
+}
 
 struct __attribute__((packed)) Packet {
   uint32_t sync_bytes;
@@ -191,6 +209,7 @@ void setup() {
   sysvar_init();       // setup sysvar protection
   watchdog_disable();  // wait for setup later
   mutex_init(&spi1_mutex);
+  payload_telemetry_init();
   queue_init(&payload_queue, sizeof(PayloadRecord), 8);
   pinMode(LED_BUILTIN, OUTPUT);
 
@@ -200,7 +219,7 @@ void setup() {
 
   Serial.begin(115200);
 
-  Serial.printf("BOOT reset_cause=%d\n", (int)watchdog_caused_reboot());
+  Serial.printf("PNC BOOT reset_cause=%d\n", (int)watchdog_caused_reboot());
 
   // I2C0 is GP4/GP5 on the PnC schematic (BME688, INA260, PCF8523, GPS).
   Wire.setSDA(I2C_SDA_PIN);
@@ -331,10 +350,6 @@ void sd_setup() {
   mutex_enter_blocking(&spi1_mutex);
   if (data_file) data_file.close();
   sd_log_opened = false;
-  if (payload_file) {
-    payload_file.close();
-    payload_log_ok = false;
-  }
 
   // arduino-pico 5.x signature: begin(csPin, spi). The 3-arg form is
   // begin(csPin, spiConfig, spi), not begin(csPin, spi, frequency).
@@ -369,17 +384,21 @@ void sd_setup() {
   sd_total_mb = (uint32_t)(total / (1024ULL * 1024ULL));
   sd_used_mb = (uint32_t)(used / (1024ULL * 1024ULL));
   uint64_t free_bytes = (total > used) ? (total - used) : 0;
-  sd_space_low = (total > 0 && free_bytes < 8ULL * 1024ULL * 1024ULL);
+  // FSInfo is unreliable on a freshly formatted card or after an unclean
+  // power-off: freeClusterCount() can fail (returns -1), and the unsigned
+  // subtraction in FSInfo then wraps usedBytes to ~total. That silently
+  // disabled logging on a 58 GB card holding one file. Treat "no free space"
+  // as unknown and keep logging; a genuinely full card trips the write-failure
+  // teardown below instead.
+  sd_space_low = (total > 0 && used < total && free_bytes < 8ULL * 1024ULL * 1024ULL);
+  if (total > 0 && used >= total) {
+    log_task("SD free space unknown (FSInfo unreliable); logging enabled");
+  }
 
-  // Reassembled packets from the other boards go to their own file. Records
-  // are self-describing (magic + length), so appending across boots is safe.
-  payload_file = SD.open("PAYLOAD.BIN", FILE_WRITE);
-  payload_log_ok = (bool)payload_file;
   mutex_exit(&spi1_mutex);
 
   log_task("Log target: " + filename +
-           (sd_space_low ? " (LOW SPACE, data logging off)" : " (lazy open)") +
-           (payload_log_ok ? " (+PAYLOAD.BIN)" : ""));
+           (sd_space_low ? " (LOW SPACE, data logging off)" : " (lazy open)"));
 }
 
 void can_setup() {
@@ -531,15 +550,15 @@ void loop() {
     }
     mutex_exit(&spi1_mutex);
     Serial.printf(
-        "STATUS sd=%d file=%s bytes=%lu sd_open=%d sd_low=%d sd_info=%d "
-        "sd_total_mb=%lu sd_used_mb=%lu payload_open=%d sd_failures=%u "
+        "PNC STATUS sd=%d file=%s bytes=%lu sd_open=%d sd_low=%d sd_info=%d "
+        "sd_total_mb=%lu sd_used_mb=%lu sd_failures=%u "
         "sensors=%d/%d can=%d tx=%lu rx=%lu "
         "busreset=%lu payload_frames=%lu pkt_rx=%lu pkt_drop=%lu queue_drop=%lu pkt_log=%lu "
         "payload_age=%lu reset=%d wdt=%d\n",
         sd_status, filename.c_str(), (unsigned long)file_size,
         sd_log_opened ? 1 : 0, sd_space_low ? 1 : 0, sd_info_ok ? 1 : 0,
         (unsigned long)sd_total_mb, (unsigned long)sd_used_mb,
-        payload_log_ok ? 1 : 0, (unsigned)sd_remounts, sensor_count,
+        (unsigned)sd_remounts, sensor_count,
         (int)sensors_len, can_ok ? 1 : 0, (unsigned long)can_bus.framesSent(),
         (unsigned long)can_bus.framesReceived(),
         (unsigned long)can_bus.busResets(),
@@ -551,10 +570,6 @@ void loop() {
         can_payload_frames ? (unsigned long)(millis() - can_last_payload_ms)
                            : 0UL,
         (int)rp2040.getResetReason(), (int)watchdog_caused_reboot());
-    if (can_payload_frames) {
-      Serial.printf("PAYLOAD node=%u pkt_len=%u\n", can_payload_node,
-                    can_bus.lastPacketLength());
-    }
   }
 
   delay(200);
@@ -577,12 +592,12 @@ void handle_serial_commands() {
         if (epoch_buf.length() >= 9) {
           uint32_t epoch = strtoul(epoch_buf.c_str(), nullptr, 10);
           if (rtc_sensor.setTime(epoch)) {
-            Serial.printf("[PNC] RTC set to %lu\n", (unsigned long)epoch);
+            Serial.printf("PNC RTC set to %lu\n", (unsigned long)epoch);
           } else {
-            Serial.println("[PNC] RTC set failed");
+            Serial.println("PNC RTC set failed");
           }
         } else {
-          Serial.println("[PNC] usage: S<unix-seconds>");
+          Serial.println("PNC usage: S<unix-seconds>");
         }
         expect_epoch = false;
         epoch_buf = "";
@@ -593,17 +608,17 @@ void handle_serial_commands() {
     switch (c) {
       case 'B':
       case 'b':
-        Serial.print("\n[PNC] binary packet mode\n");
+        Serial.print("\nPNC binary packet mode\n");
         pnc_binary_mode = true;
         break;
       case 'T':
       case 't':
         pnc_binary_mode = false;
-        Serial.print("\n[PNC] text CSV mode\n");
+        Serial.print("\nPNC text CSV mode\n");
         break;
       case 'R':
       case 'r':
-        Serial.print("\n[PNC] rebooting\n");
+        Serial.print("\nPNC rebooting\n");
         Serial.flush();
         // Stop the core 1 watchdog feed first, then arm a 100 ms watchdog
         // reset; otherwise the 5 ms feed defeats the reboot.
@@ -625,7 +640,7 @@ void handle_serial_commands() {
         CanLoopbackResult result = can_bus.loopbackTest();
         mutex_exit(&spi1_mutex);
         Serial.printf(
-            "[PNC] CAN loopback %s sent=%lu received=%lu id=0x%03X len=%u\n",
+            "PNC CAN loopback %s sent=%lu received=%lu id=0x%03X len=%u\n",
             result.ok ? "PASS" : "FAIL", (unsigned long)result.sent_counter,
             (unsigned long)result.received_counter, result.echoed_id,
             result.echoed_len);
@@ -636,7 +651,7 @@ void handle_serial_commands() {
         mutex_enter_blocking(&spi1_mutex);
         bool ok = can_bus.timeLoopbackTest(1700000000UL);
         mutex_exit(&spi1_mutex);
-        Serial.printf("[PNC] CAN time-sync loopback %s\n",
+        Serial.printf("PNC CAN time-sync loopback %s\n",
                       ok ? "PASS" : "FAIL");
         break;
       }
@@ -650,7 +665,7 @@ void handle_serial_commands() {
         uint8_t last_len = can_bus.lastPacketLength();
         mutex_exit(&spi1_mutex);
         Serial.printf(
-            "[PNC] CAN packet loopback %s (tx=%lu rx=%lu drop=%lu len=%u)\n",
+            "PNC CAN packet loopback %s (tx=%lu rx=%lu drop=%lu len=%u)\n",
             ok ? "PASS" : "FAIL", (unsigned long)tx, (unsigned long)rx,
             (unsigned long)drops, last_len);
         break;
@@ -658,7 +673,7 @@ void handle_serial_commands() {
       case 'N':
       case 'n':
         Serial.printf(
-            "[PNC] can ready=%d tx=%lu rx=%lu txerr=%lu rxerr=%lu "
+            "PNC can ready=%d tx=%lu rx=%lu txerr=%lu rxerr=%lu "
             "timesync=%lu timereq=%lu busreset=%lu lastid=0x%03X\n",
             can_bus.ready() ? 1 : 0, (unsigned long)can_bus.framesSent(),
             (unsigned long)can_bus.framesReceived(),
@@ -670,7 +685,7 @@ void handle_serial_commands() {
         break;
       case 'C':
       case 'c':
-        Serial.printf("[PNC] rtc=%lu lost_power=%d\n",
+        Serial.printf("PNC rtc=%lu lost_power=%d\n",
                       (unsigned long)rtc_sensor.nowUnix(),
                       (int)rtc_sensor.lostPower());
         break;
@@ -678,7 +693,7 @@ void handle_serial_commands() {
       case 's':
         expect_epoch = true;
         epoch_buf = "";
-        Serial.println("[PNC] send S<unix-seconds> then newline");
+        Serial.println("PNC send S<unix-seconds> then newline");
         break;
       default:
         break;
@@ -688,75 +703,149 @@ void handle_serial_commands() {
 
 void dump_sd_summary() {
   if (!sd_status) {
-    Serial.println("[PNC] SD not mounted");
+    Serial.println("PNC SD not mounted");
     return;
   }
 
   mutex_enter_blocking(&spi1_mutex);
   uint32_t size = 0;
-  uint32_t packets = 0;
-  uint32_t valid = 0;
-  uint32_t bad = 0;
   if (data_file) {
     data_file.flush();
     size = data_file.size();
-    packets = size / sizeof(Packet);
+  }
 
-    // Read through a separate read-only handle: the logging handle is opened
-    // O_APPEND/O_RDWR and does not reliably seek back for verification.
+  // The data file interleaves two record types: 87-byte PnC packets
+  // (0xDEADCAFE) and PLOG payload records ("PLOG" magic, 14-byte header +
+  // the payload's own packet). Walk with a sliding 4-byte window so an
+  // unknown word resyncs a byte at a time; both records are checksum
+  // validated, same as the offline decoders.
+  uint32_t pnc_valid = 0, pnc_bad = 0;
+  uint32_t plog_valid = 0, plog_bad = 0;
+  {
     File read_file = SD.open(filename, FILE_READ);
     if (read_file) {
-      Packet p;
-      read_file.seek(0);
-      while (read_file.read((uint8_t*)&p, sizeof(p)) == sizeof(p)) {
-        bool ok = p.sync_bytes == 0xDEADCAFE && p.length == sizeof(Packet);
-        if (ok) {
+      constexpr uint32_t kPncSync = 0xDEADCAFE;
+      constexpr uint32_t kPlogMagic = 0x474F4C50;  // bytes "PLOG"
+      uint32_t window = 0;
+      uint8_t tail[sizeof(Packet) - 4];
+      uint8_t plog_header[10];  // unix_s, uptime_ms, node, length
+      uint8_t plog_data[CAN_PACKET_MAX_LEN];
+      bool have = read_file.read((uint8_t*)&window, 4) == 4;
+      while (have) {
+        if (window == kPncSync) {
+          if (read_file.read(tail, sizeof(tail)) != (int)sizeof(tail)) break;
+          Packet p;
+          memcpy(&p, &window, 4);
+          memcpy((uint8_t*)&p + 4, tail, sizeof(tail));
+          bool ok = p.sync_bytes == kPncSync && p.length == sizeof(Packet);
+          if (ok) {
+            int8_t sum = 0;
+            uint8_t* b = (uint8_t*)&p;
+            for (size_t i = 0; i < sizeof(p); i++) sum += b[i];
+            ok = sum == 0;
+          }
+          ok ? pnc_valid++ : pnc_bad++;
+          have = read_file.read((uint8_t*)&window, 4) == 4;
+        } else if (window == kPlogMagic) {
+          if (read_file.read(plog_header, sizeof(plog_header)) !=
+              (int)sizeof(plog_header)) break;
+          uint8_t length = plog_header[9];
+          if (length == 0 ||
+              read_file.read(plog_data, length) != (int)length) {
+            plog_bad++;
+            break;
+          }
           int8_t sum = 0;
-          uint8_t* b = (uint8_t*)&p;
-          for (size_t i = 0; i < sizeof(Packet); i++) sum += b[i];
-          ok = sum == 0;
-        }
-        if (ok) {
-          valid++;
+          for (uint8_t i = 0; i < length; i++) sum += (int8_t)plog_data[i];
+          sum == 0 ? plog_valid++ : plog_bad++;
+          have = read_file.read((uint8_t*)&window, 4) == 4;
         } else {
-          bad++;
+          int c = read_file.read();
+          if (c < 0) break;
+          window = (window >> 8) | ((uint32_t)c << 24);
         }
       }
       read_file.close();
     }
   }
 
-  uint32_t payload_size = 0;
-  if (payload_log_ok) {
-    payload_file.flush();
-    payload_size = payload_file.size();
-  }
-
   mutex_exit(&spi1_mutex);
 
-  Serial.printf("[PNC] %s bytes=%lu packets=%lu valid=%lu bad=%lu\n",
-                filename.c_str(), (unsigned long)size, (unsigned long)packets,
-                (unsigned long)valid, (unsigned long)bad);
-  Serial.printf("[PNC] PAYLOAD.BIN bytes=%lu packets=%lu\n",
-                (unsigned long)payload_size,
+  Serial.printf(
+      "PNC %s bytes=%lu pnc=%lu/%lu plog=%lu/%lu\n",
+      filename.c_str(), (unsigned long)size, (unsigned long)pnc_valid,
+      (unsigned long)pnc_bad, (unsigned long)plog_valid,
+      (unsigned long)plog_bad);
+  Serial.printf("PNC payload packets logged this boot: %lu\n",
                 (unsigned long)payload_packets_logged);
 }
 
-void print_packet_csv(const struct Packet& packet) {
-  Serial.printf(
-      "PKT,%lu,%u,%u,%.2f,%lu,%.2f,%lu,%.2f,%lu,%.2f,%.2f,%.2f,%lu,%u,%u,%u,"
-      "%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%d\n",
-      (unsigned long)packet.uptime, packet.id, packet.length, packet.temp_data,
-      (unsigned long)packet.rtc_time, packet.bme_data.BMETemp,
-      (unsigned long)packet.bme_data.BMEPressure, packet.bme_data.BMEHumidity,
-      (unsigned long)packet.bme_data.BMEGasResistance, packet.ina_data.INACurrent,
-      packet.ina_data.INABusVoltage, packet.ina_data.INAPower,
-      (unsigned long)packet.gps_data.unix_time_s, packet.gps_data.fix_type,
-      packet.gps_data.fix_ok, packet.gps_data.siv, packet.gps_data.lat_e7,
-      packet.gps_data.lon_e7, packet.gps_data.alt_msl_mm,
-      packet.gps_data.vel_n_mmps, packet.gps_data.vel_e_mmps,
-      packet.gps_data.vel_d_mmps, packet.gps_data.hacc_mm,
-      packet.gps_data.vacc_mm, packet.checksum);
+/**
+ * @brief One human-readable line with every live value.
+ *
+ * Replaces the old `PKT` CSV dump: prints the PnC's own sensors, then the
+ * payload board's decoded telemetry from the CAN link (PayloadTelemetry), so
+ * the serial console shows the whole stack without a decoder. The raw binary
+ * packet mode ('B') is unchanged, and the SD files remain the machine record.
+ */
+void print_data_line() {
+  float pico = 0;
+  uint32_t rtc = 0;
+  BMESensorData bme = {};
+  INASensorData ina = {};
+  GPSSensorData gps = {};
+  if (sysvar_get_pico_temp_c(&pico) != 0) pico = 0;
+  if (sysvar_get_rtc_time(&rtc) != 0) rtc = 0;
+  if (sysvar_get_bme_data(&bme) != 0) bme = {};
+  if (sysvar_get_ina_data(&ina) != 0) ina = {};
+  if (sysvar_get_gps_data(&gps) != 0) gps = {};
+
+  char line[640];
+  int n = snprintf(
+      line, sizeof(line),
+      "PNC DATA pico=%.2fC rtc=%lu "
+      "bme=%.2fC/%.0fPa/%.1f%%RH/%.0fohm "
+      "ina=%.2fmA/%.2fmV/%.2fmW "
+      "gps=fix%u/%s/siv%u/lat%.7f/lon%.7f/alt%.1fm/"
+      "vel%ld,%ld,%ldmm/s/hacc%ld/vacc%ld",
+      (double)pico, (unsigned long)rtc, (double)bme.BMETemp,
+      (double)bme.BMEPressure, (double)bme.BMEHumidity,
+      (double)bme.BMEGasResistance, (double)ina.INACurrent,
+      (double)ina.INABusVoltage, (double)ina.INAPower, (unsigned)gps.fix_type,
+      gps.fix_ok ? "ok" : "nofix", (unsigned)gps.siv,
+      (double)gps.lat_e7 / 1e7, (double)gps.lon_e7 / 1e7,
+      (double)gps.alt_msl_mm / 1000.0, (long)gps.vel_n_mmps,
+      (long)gps.vel_e_mmps, (long)gps.vel_d_mmps, (long)gps.hacc_mm,
+      (long)gps.vacc_mm);
+  if (n < 0) return;
+  if ((size_t)n >= sizeof(line)) n = sizeof(line) - 1;
+
+  PayloadTelemetry pt;
+  if (payload_telemetry_get(&pt)) {
+    n += snprintf(
+        line + n, sizeof(line) - n,
+        " | payload age=%lums node=%u n=%lu pkt=%uB "
+        "pico=%.2fC tmp117=%.2fC "
+        "bme=%.2fC/%.0fPa/%.1f%%RH/%.0fohm "
+        "ens=%u/%uppb/%uppm shtc3=%.2fC/%.1f%%RH "
+        "uv=%.3f/%.3f/%.3f bmp390=%.2fC/%.0fPa/%.0fm "
+        "o3=%dppb tmp117sci=%.2fC",
+        (unsigned long)(millis() - pt.last_rx_ms), (unsigned)pt.node,
+        (unsigned long)pt.packets, (unsigned)pt.last_length,
+        (double)pt.pico_temp_c, (double)pt.tmp117_ext_c,
+        (double)pt.bme_temp_c, (double)pt.bme_pressure_pa,
+        (double)pt.bme_humidity_pct, (double)pt.bme_gas_ohm,
+        (unsigned)pt.ens_aqi, (unsigned)pt.ens_tvoc_ppb,
+        (unsigned)pt.ens_eco2_ppm, (double)pt.shtc3_temp_c,
+        (double)pt.shtc3_humidity_pct, (double)pt.uv_a_uw_cm2,
+        (double)pt.uv_b_uw_cm2, (double)pt.uv_c_uw_cm2,
+        (double)pt.bmp390_temp_c, (double)pt.bmp390_pressure_pa,
+        (double)pt.bmp390_alt_m, (int)pt.ozone_ppb,
+        (double)pt.tmp117_sci_c);
+  } else {
+    n += snprintf(line + n, sizeof(line) - n, " | payload none");
+  }
+  Serial.println(line);
 }
 
 #if PNC_ENABLE_RADIACODE
@@ -816,7 +905,7 @@ void radiacode_service() {
 
   if ((int32_t)(millis() - next_ms) < 0) return;
 
-  if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode clock sync");
+  if (!pnc_binary_mode) Serial.println("PNC RadiaCode clock sync");
 
   // The framework's connect() is a single blocking call we cannot feed from
   // inside. Keep the watchdog armed but alarm-fed for this bounded ground
@@ -827,7 +916,7 @@ void radiacode_service() {
 
   if (connect_rc != 0) {
     next_ms = millis() + RC_RETRY_MS;
-    if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode connect failed");
+    if (!pnc_binary_mode) Serial.println("PNC RadiaCode connect failed");
     return;
   }
   watchdog_update();
@@ -845,7 +934,7 @@ void radiacode_service() {
 #endif
   if (unix_s < 1600000000UL) {
     next_ms = millis() + RC_RETRY_NO_TIME_MS;
-    if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode clock unknown");
+    if (!pnc_binary_mode) Serial.println("PNC RadiaCode clock unknown");
   } else {
     rc_ble_window_begin();
     uint8_t set_rc = radiacode_set_time(unix_s);
@@ -853,19 +942,19 @@ void radiacode_service() {
     if (set_rc == 0) {
       next_ms = millis() + RC_SYNC_PERIOD_MS;
       if (!pnc_binary_mode) {
-        Serial.printf("[PNC] RadiaCode clock set to %lu\n",
+        Serial.printf("PNC RadiaCode clock set to %lu\n",
                       (unsigned long)unix_s);
       }
     } else {
       next_ms = millis() + RC_RETRY_MS;
-      if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode clock set failed");
+      if (!pnc_binary_mode) Serial.println("PNC RadiaCode clock set failed");
     }
   }
 
   // Always drop the link: the device keeps logging on its own, and a live link
   // is what upsets the SD path on this board.
   radiacode_ble_disconnect();
-  if (!pnc_binary_mode) Serial.println("[PNC] RadiaCode released");
+  if (!pnc_binary_mode) Serial.println("PNC RadiaCode released");
 }
 #endif
 
@@ -960,8 +1049,6 @@ void store_data() {
         ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
         sd_status = false;
         sd_remounts++;
-        if (payload_file) payload_file.close();
-        payload_log_ok = false;
         SD.end(false);
       }
     }
@@ -984,18 +1071,19 @@ void store_data() {
       sd_log_opened = false;
       sd_status = false;
       sd_remounts++;
-      if (payload_file) payload_file.close();
-      payload_log_ok = false;
       SD.end(false);
     }
 
     // Drain packets reassembled by the core 1 CAN task and append them to
-    // PAYLOAD.BIN. Each record is:
+    // the same data file, interleaved with the PnC's own records. Each
+    // record is:
     //   uint32 magic "PLOG" | uint32 unix_s | uint32 pnc_uptime_ms |
     //   uint8 node | uint8 length | uint8 data[length]
+    // The magic tells the decoders a payload record from a PnC packet
+    // (0xDEADCAFE, fixed 87 bytes), so one file holds the whole flight.
     if (sd_log_opened) {
     PayloadRecord record;
-    while (payload_log_ok && queue_try_remove(&payload_queue, &record)) {
+    while (queue_try_remove(&payload_queue, &record)) {
       uint8_t buffer[14 + CAN_PACKET_MAX_LEN];
       uint16_t offset = 0;
       const uint32_t magic = 0x474F4C50;  // bytes "PLOG"
@@ -1010,15 +1098,14 @@ void store_data() {
       memcpy(buffer + offset, record.data, record.length);
       offset += record.length;
 
-      if (payload_file.write(buffer, offset) != offset) {
-        payload_log_ok = false;
-        payload_file.close();
+      if (data_file.write(buffer, offset) != offset) {
+        ErrorDisplay::instance().addCode(Error::SD_CARD_FAIL);
+        data_file.close();
+        sd_log_opened = false;
+        sd_status = false;
+        sd_remounts++;
+        SD.end(false);
         break;
-      }
-      static uint8_t payload_pending = 0;
-      if (++payload_pending >= 16) {
-        payload_pending = 0;
-        payload_file.flush();
       }
       payload_packets_logged++;
     }
@@ -1032,7 +1119,7 @@ void store_data() {
   if (pnc_binary_mode) {
     Serial.write((uint8_t*)&packet, sizeof(packet));
   } else {
-    print_packet_csv(packet);
+    print_data_line();
   }
 }
 

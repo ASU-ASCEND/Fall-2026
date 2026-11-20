@@ -16,3 +16,9 @@ struct CheckoutHealth {
 void checkout_init();
 void checkout_poll(const CheckoutHealth& health);
 bool checkout_is_active();
+
+// Append one diagnostic line to CHECKOUT.LOG on the SD card (implemented in
+// main.cpp). Used to debug the checkout window when no USB is attached: AP
+// up/down, client connections, and every request line. Bounded work per call;
+// no-op when the card is unavailable.
+void pnc_event_log(const char* line);

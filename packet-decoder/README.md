@@ -43,7 +43,12 @@ uv run --with pyserial python payload_live.py --port /dev/cu.usbmodem1101
 ```
 
 The decoder matches known layouts from the mask sentinel and byte count
-(partial packets are normal); ambiguous matches are rejected. The current payload build sends seven sensors:
+(partial packets are normal). When two builds share a sensor count and a
+packet's length fits both, the packet is ambiguous; per file, packets that fit
+only one build resolve the build and the ambiguous siblings decode under it
+(`decode_file` announces the resolution on stderr). Files with missing or
+split evidence keep rejecting ambiguous packets. Ambiguous matches are never
+guessed in isolation. The current payload build sends seven sensors:
 temp, IMU, RTC, TMP117, BME688, ENS160, SHTC3. The geiger and dummy-external
 variants remain decodable for older logs.
 
@@ -51,6 +56,15 @@ The checked-in `raw_data/Payload` captures use an unsupported 12-sensor layout;
 do not infer their field mapping from the current firmware. The summary's
 skipped-byte count includes unsupported packets, corruption, and partial tails,
 and does not distinguish them.
+
+`raw_data/ASCEND-PAYL` holds the FA26 flight-card captures (volume
+`ASCEND-PAYL`, November 2026 bench runs): files 0000–0006 from the 10-slot
+build and 0007–0012 from the 11-slot science build, all decoding with zero
+skipped bytes. The science-board BMP390 and TMP117Sci mask bits never appear
+in the 11-slot captures. `parsed/RAWDATAnnnn.jsonl` beside them stores the
+`--json` decode of each file, and `data-processing/data/ASCEND-PAYL.csv`
+holds the same packets as one wide table (`File`, `Session`, `Millis`, one
+column per sensor field) for the notebooks.
 
 ## Decode the PnC's payload log
 

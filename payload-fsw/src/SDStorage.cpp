@@ -433,7 +433,7 @@ bool SDStorage::printSummary() {
 
   this->file_.seek(size);
 
-  Serial.printf("[PNC] %s bytes=%lu packets=%lu bad=%lu\n",
+  Serial.printf("Payload %s bytes=%lu packets=%lu bad=%lu\n",
                 this->file_name.c_str(), (unsigned long)size,
                 (unsigned long)packets, (unsigned long)bad);
   return true;

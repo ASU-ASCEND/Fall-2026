@@ -168,6 +168,12 @@ exactly 1.65 V, which is the undefined state.
 
 ## 5. Internal board: IMU address collides with the RTC
 
+> **Status update 2026-11-20:** the IMU is now dropped from flight firmware
+> (`PAYLOAD_ENABLE_ICM20948=0`); its packet slot is reserved (bit never set)
+> so no mask bit shifts and old captures still decode. The checkout page no
+> longer lists it. The rework below is only needed if IMU data is ever
+> wanted again.
+
 **Sheets:** `ICM20948_Motion_Tracker.SchDoc`, `RealTimeClock_UpdatedCrystal.SchDoc`.
 ```
 U600 (ICM-20948)  pin 9 AD0/SDO → GND      → I2C address 0x68

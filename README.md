@@ -33,39 +33,35 @@ ln -sf "$PWD/scripts/tio-config" ~/.config/tio/config
 ```
 
 `scripts/tio-config` enables ISO 8601 line timestamps and append-only logging in
-`logs/`, and includes `~/.config/tio/ports.conf`, which holds the `pnc` and
-`payload` profiles. It also sets `map = INLCRNL`: tio leaves the terminal in raw
-mode, so a bare LF from the board does not return the cursor to the left edge
-and long payload packet lines stair-step across the pane. The mapping keeps
-every line starting at column 0; log files stay plain LF.
+`logs/`. It also sets `map = INLCRNL`: tio leaves the terminal in raw mode, so a
+bare LF from the board does not return the cursor to the left edge and long
+payload packet lines stair-step across the pane. The mapping keeps every line
+starting at column 0; log files stay plain LF.
 
-macOS has no `/dev/serial/by-id`, and both Pico 2W boards enumerate with the
-same name, so ports are matched by USB serial number instead of port number:
+Both firmwares prefix every line with their board name (`PNC ` / `Payload `), so
+there is one log file and nothing maps a board to a file name. That mapping used
+to rot: macOS has no `/dev/serial/by-id` and a replugged Pico comes back on a
+different `/dev/cu.usbmodem*` name, so a board could silently start writing the
+other board's log.
 
 ```sh
-uv run scripts/tio_serial.py pnc      # PnC console
-uv run scripts/tio_serial.py payload  # payload console
-uv run scripts/tio_serial.py both     # both, in a tmux session
-uv run scripts/tio_serial.py status   # current serial -> port mapping
-uv run scripts/tio_serial.py list     # every USB serial device with its port
+uv run scripts/tio_serial.py start    # one detached tio per attached Pico
+uv run scripts/tio_serial.py status   # log size, PIDs, last line per board
+uv run scripts/tio_serial.py stop
+uv run scripts/tio_serial.py list     # devices, marked logged or ignored
 ```
 
-Each launch reads the USB tree, rewrites `ports.conf` with the current device
-paths, and runs `tio <profile>`. tio reconnects to the same device path on its
-own; if a board is moved to a different USB port, rerun the same command to
-re-resolve it. Quit with `ctrl-t q`.
+`start` finds the Pico boards by USB name, skips any port another process already
+has open, and runs one `tio` per board appending to `logs/ascend.log`. tio
+reconnects on its own and the wrapper restarts it if it exits, so a gap shows up
+in `status` instead of silently ending the log.
 
-The board USB serial numbers are recorded in `BOARDS` in
-`scripts/tio_serial.py`; update them if a Pico is replaced (`list` prints the
-serial of every attached device).
-
-Output is appended to `logs/pnc.log` and `logs/payload.log`, one timestamped
-line each:
+Output is appended to `logs/ascend.log`, one timestamped line each:
 
 ```sh
-tail -f logs/pnc.log
-grep -a "STATUS" logs/payload.log
-grep -a "2026-11-16T13:3" logs/*.log
+tail -f logs/ascend.log
+tail -f logs/ascend.log | grep --line-buffered -a ' PNC '
+grep -a 'STATUS' logs/ascend.log
 ```
 
 `logs/` is gitignored. Payload packets are binary, so use `grep -a` on them.

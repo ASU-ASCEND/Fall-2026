@@ -193,6 +193,12 @@ def main() -> int:
                         line, _, rest = buffer.partition(b"\n")
                         buffer = bytearray(rest)
                         text = line.decode(errors="replace")
+                        if text.startswith("DATA "):
+                            # New firmware prints one human-readable line with
+                            # every value (PnC + decoded payload); pass it on.
+                            print(text, flush=True)
+                            count += 1
+                            continue
                         if not text.startswith("PKT,"):
                             print(text, file=sys.stderr)
                             continue

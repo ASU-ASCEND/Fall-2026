@@ -19,11 +19,13 @@
 // CAN protocol / transport
 #include "CanBus.h"
 
-// parent classes
+// sensor classes
 #include "Sensor.h"
 
 // include sensor headers here
+#if PAYLOAD_ENABLE_ICM20948
 #include "ICM20948Sensor.h"
+#endif
 #include "TempSensor.h"
 #if PAYLOAD_ENABLE_GEIGER
 #include "GeigerSensor.h"
@@ -69,7 +71,9 @@ extern volatile uint32_t payload_sd_packets_dropped;
 // clang-format off
 // class        sensor            minimum period in ms
 TempSensor      temp_sensor       (1000);
+#if PAYLOAD_ENABLE_ICM20948
 ICM20948Sensor  icm_sensor        (0);
+#endif
 #if PAYLOAD_ENABLE_GEIGER
 GeigerSensor    geiger_sensor     (1000);
 #endif
@@ -97,7 +101,14 @@ TMP11xSensor    tmp_sensor_sci   (500, &STRATOCORE_I2C);
 // clang-format off
 Sensor* sensors[] = {
     &temp_sensor,
+#if PAYLOAD_ENABLE_ICM20948
     &icm_sensor,
+#else
+    nullptr,  // Reserved IMU slot, bit never set. The ICM-20948 was dropped
+              // 2026-11-20: its 0x68 address collides with the PCF8523 RTC on
+              // I2C0 (see PayloadConfig.h), and the hardware is dead. The
+              // slot stays so no mask bit shifts and old captures decode.
+#endif
     nullptr,  // Reserved RTC packet bit; the RTC is disabled.
 #if PAYLOAD_ENABLE_GEIGER
     &geiger_sensor,
@@ -128,10 +139,14 @@ Sensor* sensors[] = {
 const int sensors_len = sizeof(sensors) / sizeof(sensors[0]);
 
 // Number of sensors that must answer for a healthy boot. PicoTemp always
-// verifies, so this counts IMU + the External-board parts that are
-// compiled in.
+// verifies, so this counts every compiled-in part. Fixed 2026-11-20: the
+// science sensors had joined the array without joining this count (the
+// "9/8" boot), and the dead IMU was counted here while never verifying.
 const int expected_sensors =
-    2
+    1  // PicoTemp
+#if PAYLOAD_ENABLE_ICM20948
+    + 1
+#endif
 #if PAYLOAD_ENABLE_GEIGER
     + 1
 #endif
@@ -139,7 +154,10 @@ const int expected_sensors =
     + 4
 #endif
 #if PAYLOAD_ENABLE_STRATOSENSE
-    + 2
+    + 2  // AS7331 UV + ozone
+#endif
+#if PAYLOAD_ENABLE_SCIENCE
+    + 2  // science BMP390 + TMP117
 #endif
     ;
 
@@ -234,15 +252,17 @@ void loop() {
 
   handleSerial();
 
-  // start print line with iteration number
-  log_core_printf("it: %d\n", it);
-
   // build csv row
   uint8_t packet[QT_ENTRY_SIZE];
   uint16_t packet_len = readSensorDataPacket(packet);
 
-  // print csv row
-  log_data_raw(packet, packet_len);
+  // Binary mode ('B') streams raw packets for payload_live.py; the default
+  // text mode prints one readable DATA line instead of raw packet bytes.
+  if (payload_quiet) {
+    Serial.write(packet, packet_len);
+  } else {
+    log_core("DATA " + decodePacket(packet));
+  }
 
   // send data to core1
   payload_packets_generated++;
@@ -357,7 +377,6 @@ uint16_t readSensorDataPacket(uint8_t* packet) {
 
   // calc data len
   packet_len = (temp_packet - packet) + 1;  // + 1 for checksum
-  log_core_printf("Packet Len: %d\n", packet_len);
 
   // write sensor_id
   temp_packet = packet + sizeof(SYNC_BYTES);
@@ -432,7 +451,6 @@ String decodePacket(uint8_t* packet) {
     sum += packet[i];
   }
   sum += *(int8_t*)(packet + packet_len - 1);
-  log_core_printf("Sum = %d\n", sum);
 
   return csv_row;
 }
@@ -596,12 +614,14 @@ void print_status() {
   int n = snprintf(mon, sizeof(mon), "MON pico=%.2fC",
                    temp_sensor.lastTempC());
   if (n > 0 && n < (int)sizeof(mon)) {
+#if PAYLOAD_ENABLE_ICM20948
     if (icm_sensor.getVerified() && icm_sensor.hasLastSample()) {
       n += snprintf(mon + n, sizeof(mon) - n, " icm=%.2fC/%.2fm/s2",
                     icm_sensor.lastTempC(), icm_sensor.lastAccel()[2]);
     } else {
       n += snprintf(mon + n, sizeof(mon) - n, " icm=unavailable");
     }
+#endif
   }
 #if PAYLOAD_ENABLE_GEIGER
   if (n > 0 && n < (int)sizeof(mon)) {
@@ -624,7 +644,7 @@ void handleSerial() {
       case 'T':
       case 't':
         payload_quiet = false;
-        Serial.println("[PNC] verbose mode");
+        Serial.println("Payload verbose mode");
         break;
       case 'I':
       case 'i':
@@ -640,7 +660,7 @@ void handleSerial() {
         break;
       case 'C':
       case 'c':
-        Serial.println("[PNC] payload RTC disabled");
+        Serial.println("Payload RTC disabled");
         break;
       case 'D':
       case 'd':
@@ -648,13 +668,13 @@ void handleSerial() {
         break;
       case 'X':
       case 'x':
-        Serial.println("[PNC] payload RTC disabled");
+        Serial.println("Payload RTC disabled");
         break;
       case 'K':
       case 'k': {
         CanLoopbackResult result = can_bus.loopbackTest();
         Serial.printf(
-            "[PNC] CAN loopback %s sent=%lu received=%lu id=0x%03X len=%u\n",
+            "Payload CAN loopback %s sent=%lu received=%lu id=0x%03X len=%u\n",
             result.ok ? "PASS" : "FAIL", (unsigned long)result.sent_counter,
             (unsigned long)result.received_counter, result.echoed_id,
             result.echoed_len);
@@ -663,7 +683,7 @@ void handleSerial() {
       case 'Y':
       case 'y': {
         bool ok = can_bus.timeLoopbackTest(1700000000UL);
-        Serial.printf("[PNC] CAN time-sync loopback %s\n",
+        Serial.printf("Payload CAN time-sync loopback %s\n",
                       ok ? "PASS" : "FAIL");
         break;
       }
@@ -671,7 +691,7 @@ void handleSerial() {
       case 'l': {
         bool ok = can_bus.packetLoopbackTest(millis());
         Serial.printf(
-            "[PNC] CAN packet loopback %s (tx=%lu rx=%lu drop=%lu len=%u)\n",
+            "Payload CAN packet loopback %s (tx=%lu rx=%lu drop=%lu len=%u)\n",
             ok ? "PASS" : "FAIL", (unsigned long)can_bus.packetsSent(),
             (unsigned long)can_bus.packetsReceived(),
             (unsigned long)can_bus.packetDrops(),
@@ -681,7 +701,7 @@ void handleSerial() {
       case 'N':
       case 'n':
         Serial.printf(
-            "[PNC] can ready=%d tx=%lu rx=%lu txerr=%lu rxerr=%lu "
+            "Payload can ready=%d tx=%lu rx=%lu txerr=%lu rxerr=%lu "
             "timesync=%lu timereq=%lu busreset=%lu lastid=0x%03X time=%lu "
             "age=%lu pkt_tx=%lu pkt_rx=%lu pkt_drop=%lu\n",
             can_bus.ready() ? 1 : 0, (unsigned long)can_bus.framesSent(),
@@ -699,11 +719,11 @@ void handleSerial() {
         break;
       case 'S':
       case 's':
-        Serial.println("[PNC] payload RTC disabled");
+        Serial.println("Payload RTC disabled");
         break;
       case 'R':
       case 'r':
-        Serial.println("[PNC] rebooting");
+        Serial.println("Payload rebooting");
         Serial.flush();
         watchdog_enable(100, true);
         while (1);

@@ -101,17 +101,9 @@ void real_loop1() {
     it2++;
     digitalWrite(HEARTBEAT_PIN_1, (it2 & 0x1));
 
-    log_core("it2: " + String(it2));
-
     // Retrieve sensor data from queue
     queue_remove_blocking(&qt, received_data);
 
-    unsigned long timestamp;
-    memcpy(
-        &timestamp,
-        received_data + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint16_t),
-        sizeof(timestamp));
-    log_core("Packet Received with Millis = " + String(timestamp));
 
     // store csv row
     storeDataPacket(received_data);
@@ -137,10 +129,10 @@ void real_loop1() {
     if (sd_storage.isOpen()) {
       sd_storage.printSummary();
     } else {
-      Serial.println("[PNC] SD not mounted");
+      Serial.println("Payload SD not mounted");
     }
 #else
-    Serial.println("[PNC] local SD disabled (payload logs via PnC)");
+    Serial.println("Payload local SD disabled (payload logs via PnC)");
 #endif
   }
 

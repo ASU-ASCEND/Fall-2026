@@ -12,17 +12,20 @@
  */
 extern volatile bool payload_quiet;
 
-#define log_core_printf(fmt, ...)                     \
-  do {                                                \
-    if (!payload_quiet) {                             \
-      Serial.printf("[Core %d] " fmt, get_core_num(), \
-                    ##__VA_ARGS__);                   \
-    }                                                 \
+// Every text line starts with "Payload": both boards share one log stream on
+// the bench, so the prefix keeps them apart. Raw packet bytes are only
+// written in binary mode, never mixed into the text log.
+#define log_core_printf(fmt, ...)                          \
+  do {                                                     \
+    if (!payload_quiet) {                                  \
+      Serial.printf("Payload [Core %d] " fmt, get_core_num(), \
+                    ##__VA_ARGS__);                        \
+    }                                                      \
   } while (0)
 
 static inline void log_core(const String& str) {
   if (payload_quiet) return;
-  Serial.printf("[Core %d] %s\n", get_core_num(), str.c_str());
+  Serial.printf("Payload [Core %d] %s\n", get_core_num(), str.c_str());
 }
 
 static inline void log_data_raw(const uint8_t* packet, const uint8_t len) {
@@ -36,18 +39,18 @@ static inline void log_data_bytes(const uint8_t* packet, const uint8_t len) {
     packet_as_hex += String(packet[i], HEX) + " ";
   }
   packet_as_hex += "\n";
-  Serial.print(packet_as_hex);
+  Serial.print("Payload " + packet_as_hex);
 }
 
 static inline void log_data(String data) {
   if (payload_quiet) return;
-  Serial.print("[Data] " + data + "\n");
+  Serial.print("Payload [Data] " + data + "\n");
 }
 
 // Log flash-related data
 static inline void log_flash(String data) {
   if (payload_quiet) return;
-  Serial.print("[Flash] " + data + '\n');
+  Serial.print("Payload [Flash] " + data + '\n');
 }
 
 #endif  // LOGGER_H

@@ -180,7 +180,11 @@ const uint8_t SYNC_BYTES[] = {'A', 'S', 'U', '!'};
 #endif
 
 #ifndef PAYLOAD_ENABLE_ICM20948
-#define PAYLOAD_ENABLE_ICM20948 1
+// 0 since 2026-11-20: the IMU's 0x68 address collides with the PCF8523 RTC on
+// I2C0 and the part is dead on this board (see HARDWARE_DEBUG.md). The packet
+// slot is reserved (bit never set), so the mask layout and all decoders stay
+// valid. Flip to 1 only after the AD0 rework.
+#define PAYLOAD_ENABLE_ICM20948 0
 #endif
 
 /**

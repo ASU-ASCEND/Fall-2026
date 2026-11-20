@@ -4,17 +4,20 @@
 #include <Arduino.h>
 #include <stdarg.h>
 
-#define log_printf(...) Serial.printf(__VA_ARGS__)
+// Every line this board prints starts with "PNC": both boards share one log
+// stream on the bench, so the prefix keeps them apart. Packet bytes are only
+// written in binary mode ('B'), never mixed into the text log.
+#define log_printf(...) Serial.printf("PNC " __VA_ARGS__)
 
 #define log_task_printf(fmt, ...) \
-  Serial.printf("[Core %d] " fmt, get_core_num(), ##__VA_ARGS__)
+  Serial.printf("PNC [Core %d] " fmt, get_core_num(), ##__VA_ARGS__)
 
 static inline void log_task(String str) {
-  Serial.print("[" + String(get_core_num()) + "] " + str + "\n");
+  Serial.print("PNC [" + String(get_core_num()) + "] " + str + "\n");
 }
 
 static inline void log_task_error(String str) {
-  Serial.print("[ERROR - " + String(get_core_num()) + "] " + str + "\n");
+  Serial.print("PNC [ERROR - " + String(get_core_num()) + "] " + str + "\n");
 }
 
 static inline void log_data_raw(const uint8_t* packet, const uint8_t len) {
@@ -27,11 +30,11 @@ static inline void log_data_bytes(const uint8_t* packet, const uint8_t len) {
     packet_as_hex += String(packet[i], HEX) + " ";
   }
   packet_as_hex += "\n";
-  Serial.print(packet_as_hex);
+  Serial.print("PNC " + packet_as_hex);
 }
 
 static inline void log_data(String data) {
-  Serial.print("[Data] " + data + "\n");
+  Serial.print("PNC [Data] " + data + "\n");
 }
 
 #endif  // LOGGER_H

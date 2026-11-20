@@ -32,8 +32,13 @@ board's live BMP390 in the new build: 20 bytes, double temp, double pressure,
 float altitude), then the Science board's TMP117 (4 bytes). A sensor that has no
 new data drops its mask bit, so packet length varies within a layout.
 
-The decoder matches known layouts by sensor count and byte count. Ambiguous
-layouts are rejected rather than silently assigning values to the wrong sensor.
+The decoder matches known layouts by sensor count and byte count. When two
+builds share a sensor count, a packet whose length fits both is ambiguous and
+is rejected rather than silently assigning values to the wrong sensor. Per
+file, packets that fit exactly one build resolve the build: a capture whose
+unambiguous evidence all points to one build is a capture from that build, so
+its ambiguous packets decode under it. Files with missing or split evidence
+keep rejecting ambiguous packets.
 
 Usage::
 
@@ -203,6 +208,73 @@ LAYOUTS: dict[int, tuple[tuple[SensorLayout, ...], ...]] = {
     ),
 }
 
+# Human names for the alternative builds behind one sensor count, in LAYOUTS
+# order, used when reporting a per-file build resolution.
+BUILD_LABELS: dict[int, tuple[str, ...]] = {
+    4: ("geiger build", "dummy-external build"),
+    8: ("geiger build", "dummy-external build"),
+    11: ("geiger build", "science build"),
+}
+
+
+def candidate_bytes(
+    candidate: tuple[SensorLayout, ...], mask: int, sentinel: int
+) -> int:
+    """Bytes a packet occupies when the mask-set sensors of this build appear."""
+    total = HEADER_LEN + 1  # header + checksum
+    for index, sensor in enumerate(candidate):
+        if mask & (1 << (sentinel - 1 - index)):
+            total += sensor.size
+    return total
+
+
+def matching_candidates(
+    mask: int, length: int, layouts: dict[int, tuple[tuple[SensorLayout, ...], ...]] | None = None
+) -> tuple[int, ...]:
+    """Indices of the builds for this sensor count whose byte count fits."""
+    layouts = LAYOUTS if layouts is None else layouts
+    sentinel = mask.bit_length() - 1
+    candidates = layouts.get(sentinel)
+    if candidates is None:
+        return ()
+    return tuple(
+        index
+        for index, candidate in enumerate(candidates)
+        if candidate_bytes(candidate, mask, sentinel) == length
+    )
+
+
+def detect_builds(raw: bytes) -> dict[int, int]:
+    """Per sensor count, the single build this capture's packets prove.
+
+    Only a packet whose length fits one build alone counts as evidence. A
+    sensor count maps to a build when that evidence exists and is unanimous;
+    missing or split evidence leaves every candidate in place.
+    """
+    multi = {s for s, candidates in LAYOUTS.items() if len(candidates) > 1}
+    evidence: dict[int, set[int]] = {}
+    offset = 0
+    while True:
+        start = raw.find(SYNC, offset)
+        if start < 0 or start + HEADER_LEN > len(raw):
+            break
+        mask, length = struct.unpack_from("<IH", raw, start + 4)
+        if length < HEADER_LEN + 1 or start + length > len(raw):
+            offset = start + 1
+            continue
+        packet = raw[start : start + length]
+        sentinel = mask.bit_length() - 1
+        if sentinel in multi and sum(packet) & 0xFF == 0:
+            matches = matching_candidates(mask, length)
+            if len(matches) == 1:
+                evidence.setdefault(sentinel, set()).add(matches[0])
+        offset = start + length
+    return {
+        sentinel: next(iter(builds))
+        for sentinel, builds in evidence.items()
+        if len(builds) == 1
+    }
+
 
 def unpack_fields(fields: tuple[Field, ...], data: bytes) -> dict[str, float | int]:
     values: dict[str, float | int] = {}
@@ -215,7 +287,10 @@ def unpack_fields(fields: tuple[Field, ...], data: bytes) -> dict[str, float | i
     return values
 
 
-def decode_packet(packet: bytes) -> dict:
+def decode_packet(
+    packet: bytes,
+    layouts: dict[int, tuple[tuple[SensorLayout, ...], ...]] | None = None,
+) -> dict:
     sync, mask, length, uptime_ms = HEADER.unpack_from(packet)
 
     if sync != SYNC or length != len(packet):
@@ -227,7 +302,7 @@ def decode_packet(packet: bytes) -> dict:
         raise ValueError("bad checksum")
 
     sentinel = mask.bit_length() - 1
-    candidates = LAYOUTS.get(sentinel)
+    candidates = (LAYOUTS if layouts is None else layouts).get(sentinel)
     if candidates is None:
         raise ValueError(
             f"unknown sensor count {sentinel}; known layouts: "
@@ -237,15 +312,11 @@ def decode_packet(packet: bytes) -> dict:
     # Same sensor count, different sensors: match on the packet length. The
     # mask decides which sensors are present, so a packet where ENS160 had no
     # new data is shorter than the full layout.
-    def sent_bytes(candidate: tuple[SensorLayout, ...]) -> int:
-        total = HEADER_LEN + 1  # header + checksum
-        for index, sensor in enumerate(candidate):
-            bit = sentinel - 1 - index
-            if mask & (1 << bit):
-                total += sensor.size
-        return total
-
-    matches = [candidate for candidate in candidates if sent_bytes(candidate) == len(packet)]
+    matches = [
+        candidate
+        for candidate in candidates
+        if candidate_bytes(candidate, mask, sentinel) == length
+    ]
     if not matches:
         raise ValueError(
             f"no {sentinel}-sensor layout matches a {len(packet)}-byte packet"
@@ -277,8 +348,10 @@ def decode_packet(packet: bytes) -> dict:
     return out
 
 
-def decode_file(path: Path) -> tuple[list[dict], int]:
-    raw = path.read_bytes()
+def decode_bytes(
+    raw: bytes,
+    layouts: dict[int, tuple[tuple[SensorLayout, ...], ...]] | None = None,
+) -> tuple[list[dict], int]:
     packets: list[dict] = []
     skipped = 0
     offset = 0
@@ -302,13 +375,30 @@ def decode_file(path: Path) -> tuple[list[dict], int]:
             continue
 
         try:
-            packets.append(decode_packet(raw[offset : offset + length]))
+            packets.append(decode_packet(raw[offset : offset + length], layouts))
             offset += length
         except (ValueError, struct.error):
             skipped += 1
             offset += 1
 
     return packets, skipped
+
+
+def decode_file(path: Path, report=None) -> tuple[list[dict], int]:
+    raw = path.read_bytes()
+    builds = detect_builds(raw)
+    layouts = LAYOUTS
+    if builds:
+        layouts = dict(LAYOUTS)
+        for sentinel, index in builds.items():
+            layouts[sentinel] = (LAYOUTS[sentinel][index],)
+        if report is not None:
+            labels = ", ".join(
+                BUILD_LABELS.get(sentinel, ("build 1", "build 2"))[index]
+                for sentinel, index in sorted(builds.items())
+            )
+            report(f"{path.name}: unambiguous packets resolve {labels}")
+    return decode_bytes(raw, layouts)
 
 
 def fmt_packet(packet: dict) -> str:
@@ -415,7 +505,10 @@ def main() -> int:
     last_uptime = None
     for path in paths:
         try:
-            packets, skipped = decode_file(path)
+            packets, skipped = decode_file(
+                path,
+                report=lambda note: print(f"# {note}", file=sys.stderr),
+            )
         except FileNotFoundError:
             print(f"missing: {path}", file=sys.stderr)
             missing_input = True
