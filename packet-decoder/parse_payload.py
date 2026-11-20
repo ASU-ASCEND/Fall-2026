@@ -219,19 +219,23 @@ def decode_packet(packet: bytes) -> dict:
             f"{sorted(LAYOUTS)}"
         )
 
-<<<<<<< Updated upstream
     # Same sensor count, different sensors: match on the packet length. The
     # mask decides which sensors are present, so a packet where ENS160 had no
     # new data is shorter than the full layout.
-    def sent_bytes(candidate: tuple[SensorLayout, ...]) -> int:
-        total = HEADER_LEN + 1  # header + checksum
+    def sent_bytes(candidate: tuple[SensorLayout, ...], header_len: int) -> int:
+        total = header_len + 1  # header + checksum
         for index, sensor in enumerate(candidate):
             bit = sentinel - 1 - index
             if mask & (1 << bit):
                 total += sensor.size
         return total
 
-    matches = [candidate for candidate in candidates if sent_bytes(candidate) == len(packet)]
+    matches = [
+        (candidate, header_len)
+        for candidate in candidates
+        for header_len in (HEADER_LEN, UTC_HEADER_LEN)
+        if sent_bytes(candidate, header_len) == len(packet)
+    ]
     if not matches:
         raise ValueError(
             f"no {sentinel}-sensor layout matches a {len(packet)}-byte packet"
@@ -240,24 +244,16 @@ def decode_packet(packet: bytes) -> dict:
         sensor for index, sensor in enumerate(candidate)
         if mask & (1 << (sentinel - 1 - index))
     )
-    if any(active(candidate) != active(matches[0]) for candidate in matches[1:]):
+    if any(
+        active(candidate) != active(matches[0][0])
+        for candidate, _ in matches[1:]
+    ):
         raise ValueError("ambiguous sensor layout; build configuration required")
-    layout = matches[0]
+    layout, header_len = matches[0]
     if any(sensor.name.startswith("Reserved") for sensor in active(layout)):
         raise ValueError("reserved sensor bit is set")
 
-    out: dict = {"uptime_ms": uptime_ms, "mask": mask, "sensors": {}}
-    offset = HEADER_LEN
-=======
-    sensor_data_size = sum(
-        sensor.size
-        for index, sensor in enumerate(layout)
-        if mask & (1 << (sentinel - 1 - index))
-    )
-    legacy_length = HEADER_LEN + sensor_data_size + 1
-    utc_length = UTC_HEADER_LEN + sensor_data_size + 1
-
-    if len(packet) == utc_length:
+    if header_len == UTC_HEADER_LEN:
         (
             _,
             _,
@@ -270,17 +266,13 @@ def decode_packet(packet: bytes) -> dict:
         ) = UTC_HEADER.unpack_from(packet)
         if utc_milliseconds > 999:
             raise ValueError("invalid UTC milliseconds")
-        header_len = UTC_HEADER_LEN
         utc_valid = bool(utc_flags & TIME_FLAG_VALID)
-    elif len(packet) == legacy_length:
+    else:
         utc_seconds = None
         utc_milliseconds = None
         utc_source = None
         utc_flags = None
-        header_len = HEADER_LEN
         utc_valid = False
-    else:
-        raise ValueError("packet length does not match sensors")
 
     out: dict = {
         "uptime_ms": uptime_ms,
@@ -293,7 +285,6 @@ def decode_packet(packet: bytes) -> dict:
         "sensors": {},
     }
     offset = header_len
->>>>>>> Stashed changes
     for index, sensor in enumerate(layout):
         bit = sentinel - 1 - index
         if not (mask & (1 << bit)):

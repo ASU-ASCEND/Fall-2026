@@ -4,6 +4,8 @@
 
 #include "SdFat.h"
 
+static constexpr uint16_t MIN_ASU_PACKET_SIZE = 23;
+
 /**
  * @brief Send CMD0 straight over SPI and return the R1 response.
  *
@@ -305,7 +307,7 @@ void SDStorage::storePacket(uint8_t* packet) {
   uint16_t packet_len;
   memcpy(&packet_len, (packet + 8), sizeof(uint16_t));
 
-  if (packet_len >= 15 && packet_len <= QT_ENTRY_SIZE) {
+  if (packet_len >= MIN_ASU_PACKET_SIZE && packet_len <= QT_ENTRY_SIZE) {
     size_t wrote = this->file_.write(packet, packet_len);
     if (wrote != packet_len) {
       log_core("SD short write");
@@ -341,7 +343,7 @@ bool SDStorage::printSummary() {
   uint32_t offset = 0;
 
   this->file_.seek(0);
-  while (offset + 15 <= size) {
+  while (offset + MIN_ASU_PACKET_SIZE <= size) {
     uint8_t header[14];
     this->file_.seek(offset);
     if (this->file_.read(header, sizeof(header)) != sizeof(header)) break;
@@ -354,7 +356,8 @@ bool SDStorage::printSummary() {
 
     uint16_t len;
     memcpy(&len, header + 8, sizeof(len));
-    if (len < 15 || len > QT_ENTRY_SIZE || offset + len > size) {
+    if (len < MIN_ASU_PACKET_SIZE || len > QT_ENTRY_SIZE ||
+        offset + len > size) {
       bad++;
       offset++;
       continue;

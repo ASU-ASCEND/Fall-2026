@@ -318,6 +318,10 @@ void rtc_raw_dump() {
  *   uint32 sensor mask
  *   uint16 packet length
  *   uint32 millis()
+ *   uint32 UTC seconds
+ *   uint16 UTC milliseconds
+ *   uint8 UTC source
+ *   uint8 UTC flags
  *   sensor payloads, in the order of the sensors[] array
  *   int8 checksum (byte sum is 0 mod 256)
  *
@@ -338,6 +342,27 @@ uint16_t readSensorDataPacket(uint8_t* packet) {
   uint32_t now = millis();
   std::copy((uint8_t*)(&now), (uint8_t*)(&now) + sizeof(now), temp_packet);
   temp_packet += sizeof(now);
+
+  uint32_t utc_seconds = 0;
+  uint16_t utc_milliseconds = 0;
+  uint8_t utc_source = 0;
+  uint8_t utc_flags = 0;
+  if (can_bus.hasTime()) {
+    utc_seconds = can_bus.utcUnix();
+    utc_milliseconds = can_bus.utcMillisOfSecond();
+    utc_source = can_bus.timeSource();
+    utc_flags = can_bus.timeFlags();
+  }
+  std::copy((uint8_t*)(&utc_seconds),
+            (uint8_t*)(&utc_seconds) + sizeof(utc_seconds), temp_packet);
+  temp_packet += sizeof(utc_seconds);
+  std::copy((uint8_t*)(&utc_milliseconds),
+            (uint8_t*)(&utc_milliseconds) + sizeof(utc_milliseconds),
+            temp_packet);
+  temp_packet += sizeof(utc_milliseconds);
+  *temp_packet++ = utc_source;
+  *temp_packet++ = utc_flags;
+
   sensor_id = (sensor_id << 1) | 1;
   // rest of the packet
   for (int i = 0; i < sensors_len; i++) {
@@ -407,6 +432,17 @@ String decodePacket(uint8_t* packet) {
 
   temp_packet += sizeof(r_now);
   csv_row += String(r_now) + ",";
+
+  uint32_t utc_seconds;
+  memcpy(&utc_seconds, temp_packet, sizeof(utc_seconds));
+  temp_packet += sizeof(utc_seconds);
+  uint16_t utc_milliseconds;
+  memcpy(&utc_milliseconds, temp_packet, sizeof(utc_milliseconds));
+  temp_packet += sizeof(utc_milliseconds);
+  uint8_t utc_source = *temp_packet++;
+  uint8_t utc_flags = *temp_packet++;
+  csv_row += String(utc_seconds) + "," + String(utc_milliseconds) + "," +
+             String(utc_source) + "," + String(utc_flags) + ",";
 
   int curr_offset = id_offset - 1;
   while (curr_offset >= 0) {
