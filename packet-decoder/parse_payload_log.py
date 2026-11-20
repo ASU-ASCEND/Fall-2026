@@ -10,6 +10,9 @@ The PnC writes one record per reassembled packet::
     uint8  length      embedded packet length
     uint8  data[length] the board's own packet ("ASU!" for the payload)
 
+The wrapper timestamp is when the PnC received the packet. Newer embedded
+payload packets also contain their own sample-time UTC fields.
+
 Usage::
 
     uv run python parse_payload_log.py PAYLOAD.BIN
@@ -81,7 +84,7 @@ def main() -> int:
             if unix_s
             else "no-time"
         )
-        print(f"{stamp} node={node} pnc_up={uptime_ms}ms {fmt_packet(packet)}")
+        print(f"rx={stamp} node={node} pnc_up={uptime_ms}ms {fmt_packet(packet)}")
 
     if args.raw:
         Path(args.raw).write_bytes(raw_out)

@@ -12,9 +12,11 @@ at offset 9, and ends with a checksum chosen so the byte sum is `0 mod 256`.
 ## Payload packet layout
 
 Variable length, little endian, packed. Every packet starts with `ASU!`, then a
-32-bit sensor mask, a 16-bit total length, `millis()`, the payloads for the
-sensors whose mask bit is set, and a checksum that makes the byte sum
-`0 mod 256`. See `parse_payload.py` for the field order and scaling.
+32-bit sensor mask, a 16-bit total length, `millis()`, UTC seconds,
+milliseconds-within-the-second, time source and flags, the payloads for sensors
+whose mask bit is set, and a checksum that makes the byte sum `0 mod 256`.
+The decoder also supports older captures without the UTC fields. See
+`parse_payload.py` for the field order and scaling.
 
 Decode a payload capture:
 
@@ -24,8 +26,8 @@ uv run python parse_payload.py RAWDATA*.BIN | head
 ```
 
 The mask, not the packet length, says which sensors are present: each sensor
-has its own read period, so packets alternate between 15, 19, 30 and 34 bytes
-on the internal-board build.
+has its own read period. New-format packets are 8 bytes longer than their
+corresponding legacy packets.
 
 Live payload reader (sends `B` for quiet mode and `T` on exit):
 
