@@ -53,6 +53,33 @@ class DecoderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "reserved sensor"):
             payload.decode_packet(payload_packet((1 << 10) | (1 << 1)))
 
+    def test_payload_science_board(self):
+        # 11 slots: Pico, IMU, RTC, TMP, BME, ENS, SHT, UV, BMP390, ozone,
+        # TMP117Sci. The Science board fills the old reserved BMP390 slot and
+        # appends its TMP117; every existing mask bit shifts up by one.
+        mask = (1 << 11) | (1 << 10) | (1 << 3) | (1 << 2) | (1 << 0)
+        data = (
+            struct.pack("<f", 23.5)
+            + struct.pack("<fff", 1.0, 2.0, 3.0)  # AS7331
+            + struct.pack("<ddf", 22.5, 97311.0, 102.0)  # science BMP390
+            + struct.pack("<f", 22.75)  # science TMP117
+        )
+        packet = payload.decode_packet(payload_packet(mask, data))
+        sensors = packet["sensors"]
+        self.assertEqual(sensors["AS7331"]["uvb_uw_cm2"], 2.0)
+        self.assertEqual(sensors["BMP390"]["bmp_pressure_pa"], 97311.0)
+        self.assertEqual(sensors["BMP390"]["bmp_alt_m"], 102.0)
+        self.assertEqual(sensors["TMP117Sci"]["temp_c"], 22.75)
+        # The pre-science build must still decode its own 10-slot packets.
+        old_mask = (1 << 10) | (1 << 9) | (1 << 2) | 1
+        old = payload.decode_packet(
+            payload_packet(
+                old_mask,
+                struct.pack("<ffffh", 23.5, 1.25, 2.5, 3.75, 20),
+            )
+        )
+        self.assertEqual(old["sensors"]["Ozone"]["ppb"], 20)
+
     def test_payload_resync_and_trailing_bytes(self):
         packet = payload_packet(0b1000)
         with tempfile.TemporaryDirectory() as directory:

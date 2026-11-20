@@ -150,6 +150,20 @@ const uint8_t SYNC_BYTES[] = {'A', 'S', 'U', '!'};
 #define PAYLOAD_ENABLE_STRATOSENSE 1
 #endif
 
+/**
+ * @brief Science board (Science boardFALL2026) on payload I2C0 (J202/J203):
+ *        BMP390 U1 (SDO->GND, 0x76) and TMP117 U2 (0x48).
+ *
+ * The BMP390 fills the packet slot reserved for the dead External-board copy,
+ * and the TMP117 appends a new final slot. Appending extends the sensor mask,
+ * so packet-decoder/parse_payload.py must be built in lockstep: the new build
+ * is the second LAYOUTS[11] candidate there (sentinel 11), while old captures
+ * keep decoding under LAYOUTS[10].
+ */
+#ifndef PAYLOAD_ENABLE_SCIENCE
+#define PAYLOAD_ENABLE_SCIENCE 1
+#endif
+
 #ifndef PAYLOAD_ENABLE_CAN
 #define PAYLOAD_ENABLE_CAN 1
 #endif

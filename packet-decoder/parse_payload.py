@@ -27,7 +27,9 @@ sensor board on J200::
 
 Optional blocks, in this order after the internal sensors: Geiger (8 bytes,
 PAYLOAD_ENABLE_GEIGER), the three rework-blocked External parts (AS7331 12,
-BMP390 12, Ozone 2), then the 16-float Science placeholder. A sensor that has no
+Ozone 2, and the BMP390 slot — empty in old layouts, but carrying the Science
+board's live BMP390 in the new build: 20 bytes, double temp, double pressure,
+float altitude), then the Science board's TMP117 (4 bytes). A sensor that has no
 new data drops its mask bit, so packet length varies within a layout.
 
 The decoder matches known layouts by sensor count and byte count. Ambiguous
@@ -151,6 +153,26 @@ STRATOSENSE_LAYOUT = (
     SensorLayout("Ozone", (Field("ppb", "h"),)),
 )
 
+# Science board (Science boardFALL2026, payload I2C0 via J202/J203): its BMP390
+# U1 (0x76) fills the slot the dead External-board copy reserved, and its
+# TMP117 U2 (0x48) appends a new final slot. The BMP390 driver writes
+# double temperature, double pressure, float altitude = 20 bytes.
+STRATOSENSE_SCIENCE_LAYOUT = (
+    STRATOSENSE_LAYOUT[0],  # AS7331, same slot
+    SensorLayout(
+        "BMP390",
+        (
+            Field("bmp_temp_c", "d", 1.0, "C"),
+            Field("bmp_pressure_pa", "d", 1.0, "Pa"),
+            Field("bmp_alt_m", "f", 1.0, "m"),
+        ),
+    ),
+    STRATOSENSE_LAYOUT[2],  # Ozone, same slot
+)
+SCIENCE_LAYOUT = (
+    SensorLayout("TMP117Sci", (Field("temp_c", "f", 1.0, "C"),)),
+)
+
 # Geiger is compiled out on this build (PAYLOAD_ENABLE_GEIGER 0 in
 # payload-fsw/include/PayloadConfig.h), so the same sensor count can describe
 # two different packets: {temp, icm, rtc, geiger} or {temp, icm, rtc, dummy}.
@@ -171,7 +193,14 @@ LAYOUTS: dict[int, tuple[tuple[SensorLayout, ...], ...]] = {
     ),
     9: (INTERNAL_LAYOUT + EXTERNAL_LAYOUT + (DUMMY_EXTERNAL,),),
     10: (INTERNAL_NO_GEIGER_LAYOUT + EXTERNAL_LAYOUT + STRATOSENSE_LAYOUT,),
-    11: (INTERNAL_LAYOUT + EXTERNAL_LAYOUT + STRATOSENSE_LAYOUT,),
+    11: (
+        INTERNAL_LAYOUT + EXTERNAL_LAYOUT + STRATOSENSE_LAYOUT,
+        # Science-board build (no geiger): live BMP390 in the old reserved slot,
+        # TMP117Sci appended. Old 11-sensor geiger captures still match by
+        # length against the first candidate.
+        INTERNAL_NO_GEIGER_LAYOUT + EXTERNAL_LAYOUT
+        + STRATOSENSE_SCIENCE_LAYOUT + SCIENCE_LAYOUT,
+    ),
 }
 
 
@@ -317,6 +346,16 @@ def fmt_packet(packet: dict) -> str:
             )
         elif name == "TMP117":
             parts.append(f"tmp117={values['temp_c']:.2f}C")
+        elif name == "TMP117Sci":
+            parts.append(f"tmp117_sci={values['temp_c']:.2f}C")
+        elif name == "BMP390":
+            parts.append(
+                "bmp390={:.2f}C {:.0f}Pa {:.0f}m".format(
+                    values["bmp_temp_c"],
+                    values["bmp_pressure_pa"],
+                    values["bmp_alt_m"],
+                )
+            )
         elif name == "BME688":
             parts.append(
                 "bme={:.2f}C {:.0f}Pa {:.1f}%RH {:.0f}ohm".format(

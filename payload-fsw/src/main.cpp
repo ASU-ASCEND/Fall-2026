@@ -36,6 +36,7 @@
 #endif
 #if PAYLOAD_ENABLE_STRATOSENSE
 #include "AS7331Sensor.h"
+#include "BMP390Sensor.h"
 #include "OzoneSensor.h"
 #endif
 
@@ -82,6 +83,13 @@ SHTC3Sensor     shtc3_sensor_out  (500,   &STRATOSENSE_I2C);
 AS7331Sensor    uv_sensor_out     (1000, UV_I2C_ADDR, &STRATOCORE_I2C);
 OzoneSensor     ozone_sensor_out  (2000, &STRATOSENSE_I2C);
 #endif
+#if PAYLOAD_ENABLE_SCIENCE
+// Science board (payload I2C0): BMP390 U1 at 0x76 (SDO strapped low) and
+// TMP117 U2 at 0x48. Same part numbers as the External board's copies but on
+// the STRATOCORE bus; no address conflict within I2C0.
+BMP390Sensor    bmp390_sensor_sci (500, &STRATOCORE_I2C);
+TMP11xSensor    tmp_sensor_sci   (500, &STRATOCORE_I2C);
+#endif
 // clang-format on
 
 // sensor array. ORDER IS PART OF THE PACKET FORMAT and must match
@@ -102,8 +110,17 @@ Sensor* sensors[] = {
 #endif
 #if PAYLOAD_ENABLE_STRATOSENSE
     &uv_sensor_out,
-    nullptr,  // Reserved BMP390 slot; the device does not respond.
+#if PAYLOAD_ENABLE_SCIENCE
+    &bmp390_sensor_sci,  // Science board BMP390 fills the reserved slot.
+#else
+    nullptr,  // Reserved BMP390 slot; the External-board copy does not respond.
+#endif
     &ozone_sensor_out,
+#endif
+#if PAYLOAD_ENABLE_SCIENCE
+    &tmp_sensor_sci,  // Science board TMP117, appended: extends the mask by
+                      // one bit and shifts the existing bits; decoder must
+                      // match (parse_payload.py LAYOUTS[11]).
 #endif
 };
 // clang-format on
