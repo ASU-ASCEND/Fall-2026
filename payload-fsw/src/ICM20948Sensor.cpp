@@ -1,7 +1,5 @@
 #include "ICM20948Sensor.h"
 
-#include <math.h>
-
 /**
  * @brief Construct a new ICM20948Sensor object with default minimum_period of 0
  *
@@ -37,43 +35,6 @@ static uint8_t icmReadReg(TwoWire& wire, uint8_t addr, uint8_t reg) {
   return (uint8_t)wire.read();
 }
 
-static bool icmWriteReg(TwoWire& wire, uint8_t addr, uint8_t reg,
-                        uint8_t value) {
-  wire.beginTransmission(addr);
-  wire.write(reg);
-  wire.write(value);
-  return wire.endTransmission() == 0;
-}
-
-/**
- * @brief Probe 0x00 with the RTC's data temporarily forced to 0xFF.
- *
- * I2C is open drain, so two slaves at 0x68 AND their output bits. The RTC's
- * Control_1 normally masks the IMU's WHO_AM_I. Writing 0xFF to Control_1
- * makes the RTC release every data bit, so a read of 0x00 shows the IMU's
- * WHO_AM_I (0xEA) if the IMU is present and powered. The original Control_1 is
- * restored immediately (the clock may lose a few milliseconds).
- */
-static uint8_t icmProbeWithRtcMasked(TwoWire& wire) {
-  // Select bank 0 first: if an earlier init left the IMU in bank 3, register
-  // 0x00 is not WHO_AM_I. 0x7F is outside the PCF8523 register map, so the RTC
-  // ignores this write.
-  icmWriteReg(wire, 0x68, 0x7F, 0x00);
-  delay(1);
-
-  uint8_t control1 = icmReadReg(wire, 0x68, 0x00);
-  if (control1 == 0xFF) {
-    return 0xFF;
-  }
-  if (!icmWriteReg(wire, 0x68, 0x00, 0xFF)) {
-    return 0xFF;
-  }
-  delay(2);
-  uint8_t who = icmReadReg(wire, 0x68, 0x00);
-  icmWriteReg(wire, 0x68, 0x00, control1);
-  return who;
-}
-
 bool ICM20948Sensor::verify() {
   // Probe WHO_AM_I before handing the address to the driver. The PCF8523 RTC
   // also answers at 0x68 on this board, so an unconditional begin_I2C(0x68)
@@ -93,48 +54,14 @@ bool ICM20948Sensor::verify() {
     log_core(
         "ICM20948 answers at 0x68, but that collides with the PCF8523 at "
         "0x68; tie AD0 high (0x69) before enabling the IMU");
-#if PAYLOAD_DUMMY_IMU
-    this->dummy_ = true;
-    log_core("IMU dummy mode: emitting synthetic IMU data on the CAN path");
-    return true;
-#else
     return false;
-#endif
 #endif
   }
 
   if (addr == 0xFF) {
-    // Neither address answered cleanly. Distinguish "IMU absent/unpowered"
-    // from "IMU present but hidden behind the RTC at 0x68". Only do this once:
-    // it briefly stops the RTC oscillator, and the recovery system retries
-    // verify() several times.
-    static bool masked_probe_done = false;
-    if (!masked_probe_done) {
-      masked_probe_done = true;
-      uint8_t masked = icmProbeWithRtcMasked(STRATOCORE_I2C);
-      log_core_printf(
-          "ICM masked probe at 0x68: WHO_AM_I=0x%02X (0xEA means the IMU is "
-          "present)\n",
-          masked);
-      if (masked == ICM20948_CHIP_ID) {
-        log_core(
-            "IMU shares 0x68 with the RTC: tie AD0/SDO (U600 pin 9) to +1V8 "
-            "to move it to 0x69");
-      } else {
-        log_core(
-            "IMU did not answer even with the RTC masked: check +1V8 VDDIO at "
-            "U600 pin 8 and whether U600 is populated");
-      }
-    }
-#if PAYLOAD_DUMMY_IMU
-    if (!this->dummy_) {
-      this->dummy_ = true;
-      log_core("IMU dummy mode: emitting synthetic IMU data on the CAN path");
-    }
-    return true;
-#else
+    // Do not write the shared 0x68 address to probe the IMU: that would also
+    // modify the disabled RTC while it remains electrically connected.
     return false;
-#endif
   }
 
   bool ok = this->icm.begin_I2C(addr, &STRATOCORE_I2C);
@@ -159,22 +86,6 @@ bool ICM20948Sensor::verify() {
 }
 
 void ICM20948Sensor::readEvents() {
-  if (this->dummy_) {
-    const float t = (millis() % 1000000UL) / 1000.0f;
-    this->last_accel_[0] = 0.05f * sinf(t * 1.3f);
-    this->last_accel_[1] = 0.03f * cosf(t * 0.7f);
-    this->last_accel_[2] = 9.80665f + 0.02f * sinf(t * 2.1f);
-    this->last_gyro_[0] = 0.002f * sinf(t * 0.9f);
-    this->last_gyro_[1] = 0.003f * cosf(t * 1.1f);
-    this->last_gyro_[2] = 0.001f * sinf(t * 0.4f);
-    this->last_mag_[0] = 21.0f + 1.5f * sinf(t * 0.05f);
-    this->last_mag_[1] = -4.0f + 1.0f * cosf(t * 0.07f);
-    this->last_mag_[2] = 43.0f + 2.0f * sinf(t * 0.03f);
-    this->last_temp_c_ = 25.0f + 0.4f * sinf(t * 0.01f);
-    this->has_sample_ = true;
-    return;
-  }
-
   sensors_event_t accel;
   sensors_event_t gyro;
   sensors_event_t temp;

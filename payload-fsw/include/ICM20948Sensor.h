@@ -24,7 +24,6 @@ class ICM20948Sensor : public Sensor {
   float last_mag_[3] = {0, 0, 0};
   float last_temp_c_ = 0;
   bool has_sample_ = false;
-  bool dummy_ = false;
 
   void readEvents();
 

@@ -115,7 +115,9 @@
 
 // multicore transfer queue
 #define QT_ENTRY_SIZE 500
-#define QT_MAX_SIZE 10
+// Keep startup samples while FAT32 free-space enumeration initializes storage.
+// Drops remain counted if a slow or unavailable card outlasts this buffer.
+#define QT_MAX_SIZE 64
 
 // packet properties
 const uint8_t SYNC_BYTES[] = {'A', 'S', 'U', '!'};
@@ -125,19 +127,42 @@ const uint8_t SYNC_BYTES[] = {'A', 'S', 'U', '!'};
  *
  * The FA26 Internal board carries the Pico, PCF8523 RTC, ICM-20948 IMU, the
  * MCP2515/TJA1051 CAN pair, the microSD socket and the Geiger input. The
- * StratoSense (external) board is not connected yet, so those drivers stay in
- * the tree but out of the build.
+ * External sensor board plugs into J200; its parts are enabled below when they
+ * pass verification.
+ */
+/**
+ * @brief External sensor board (J200) — the four devices that work today.
+ *
+ * TMP117, ENS160, SHTC3 and BME688 (temperature/humidity; its pressure channel
+ * is dead on the current board). Enabled by default because the External board
+ * is attached to the payload and its data belongs in the packet instead of the
+ * dummy placeholder.
+ */
+#ifndef PAYLOAD_ENABLE_EXTERNAL
+#define PAYLOAD_ENABLE_EXTERNAL 1
+#endif
+
+/**
+ * @brief Connected AS7331 on I2C0 and ozone sensor on I2C1.
+ * The nonresponding BMP390 has a reserved packet slot but is not enabled.
  */
 #ifndef PAYLOAD_ENABLE_STRATOSENSE
-#define PAYLOAD_ENABLE_STRATOSENSE 0
+#define PAYLOAD_ENABLE_STRATOSENSE 1
 #endif
 
 #ifndef PAYLOAD_ENABLE_CAN
 #define PAYLOAD_ENABLE_CAN 1
 #endif
 
+/**
+ * @brief MightyOhm Geiger counter on JGeig100.
+ *
+ * Not flown on this build. The driver stays in the tree but is compiled out,
+ * and the MightyOhm library is excluded in platformio.ini. Set back to 1 to
+ * restore the sensor and its two columns in the ASU! packet.
+ */
 #ifndef PAYLOAD_ENABLE_GEIGER
-#define PAYLOAD_ENABLE_GEIGER 1
+#define PAYLOAD_ENABLE_GEIGER 0
 #endif
 
 #ifndef PAYLOAD_ENABLE_ICM20948
@@ -145,36 +170,14 @@ const uint8_t SYNC_BYTES[] = {'A', 'S', 'U', '!'};
 #endif
 
 /**
- * @brief Synthetic data for bench bring-up.
- *
- * PAYLOAD_DUMMY_IMU makes the ICM driver report plausible accel/gyro/mag
- * values when the real IMU is not usable, so the CAN packet path carries the
- * same 40-byte block it will in flight.
- *
- * PAYLOAD_ENABLE_DUMMY_EXTERNAL adds a 16-float placeholder for the StratoSense
- * + Science data, so the fragmentation/reassembly path is exercised with a
- * ~138-byte packet. Set both to 0 when the real sensors are connected.
- */
-#ifndef PAYLOAD_DUMMY_IMU
-#define PAYLOAD_DUMMY_IMU 1
-#endif
-
-#ifndef PAYLOAD_ENABLE_DUMMY_EXTERNAL
-#define PAYLOAD_ENABLE_DUMMY_EXTERNAL 1
-#endif
-
-/** @brief Number of float channels the dummy external block emits. */
-#define PAYLOAD_DUMMY_EXTERNAL_CHANNELS 16
-
-/**
  * @brief Local SD logging on the payload board.
  *
- * The mission build logs the payload on the PnC's card over CAN, and there is
- * no card in the payload slot, so this is off by default. Set to 1 to restore
- * a local RAWDATAn.BIN log as a backup.
+ * The FA26 socket's `3V3` net was tied to `+3V3` on 2026-11-13 (the "wire of
+ * shame"), so the card now reaches ACMD41 and the slot is usable. Logging is a
+ * local backup; the PnC still receives the packet over CAN.
  */
 #ifndef PAYLOAD_ENABLE_SD
-#define PAYLOAD_ENABLE_SD 0
+#define PAYLOAD_ENABLE_SD 1
 #endif
 
 // temporary toggle macros for testing

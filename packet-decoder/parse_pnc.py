@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import re
 import struct
 import sys
 from pathlib import Path
@@ -78,9 +79,16 @@ FIELDS = [
     "hacc_mm",
     "vacc_mm",
     "checksum",
+    "session",
 ]
 
 assert PACKET_LEN == 87, PACKET_LEN
+
+
+def natural_key(path: str):
+    """Sort data2.bin before data10.bin instead of lexicographically."""
+    return [int(part) if part.isdigit() else part.lower()
+            for part in re.split(r"(\d+)", path)]
 
 
 def valid(packet: bytes) -> bool:
@@ -99,7 +107,10 @@ def decode_file(path: Path):
     offset = 0
     packets = []
     skipped = 0
-    while offset + PACKET_LEN <= len(raw):
+    while offset < len(raw):
+        if offset + PACKET_LEN > len(raw):
+            skipped += len(raw) - offset
+            break
         packet = raw[offset : offset + PACKET_LEN]
         if valid(packet):
             packets.append(PACKET.unpack(packet))
@@ -107,9 +118,10 @@ def decode_file(path: Path):
         else:
             # Re-sync on the next 0xDEADCAFE instead of dropping the file.
             nxt = raw.find(struct.pack("<I", SYNC), offset + 1)
-            skipped += 1
             if nxt < 0:
+                skipped += len(raw) - offset
                 break
+            skipped += nxt - offset
             offset = nxt
     return packets, skipped
 
@@ -123,11 +135,14 @@ def main() -> int:
 
     paths: list[Path] = []
     for pattern in args.files:
-        matches = sorted(glob.glob(pattern))
+        matches = sorted(glob.glob(pattern), key=natural_key)
         paths.extend(Path(p) for p in matches or [pattern])
 
     total = 0
     skipped = 0
+    missing_input = False
+    session = 0
+    last_uptime = None
     if not args.summary and not args.csv:
         print(",".join(FIELDS))
 
@@ -136,18 +151,25 @@ def main() -> int:
             packets, file_skipped = decode_file(path)
         except FileNotFoundError:
             print(f"missing: {path}", file=sys.stderr)
+            missing_input = True
             continue
         total += len(packets)
         skipped += file_skipped
         if not args.summary:
             for values in packets:
-                print(",".join(str(v) for v in values))
+                # uptime_ms restarts at every boot; a decrease is the reliable
+                # session boundary now that a file may span boots.
+                uptime = values[1]
+                if last_uptime is not None and uptime < last_uptime:
+                    session += 1
+                last_uptime = uptime
+                print(",".join(str(v) for v in (*values, session)))
         else:
-            print(f"{path}: {len(packets)} packets, {file_skipped} resyncs")
+            print(f"{path}: {len(packets)} packets, {file_skipped} skipped bytes")
 
     if args.summary:
-        print(f"total: {total} packets, {skipped} resyncs")
-    return 0
+        print(f"total: {total} packets, {skipped} skipped bytes")
+    return 1 if missing_input else 0
 
 
 if __name__ == "__main__":

@@ -1,8 +1,11 @@
 #ifndef GEIGER_SENSOR_H
 #define GEIGER_SENSOR_H
 
-#include "GeigerCounter.h"
 #include "PayloadConfig.h"
+
+#if PAYLOAD_ENABLE_GEIGER
+
+#include "GeigerCounter.h"
 #include "Sensor.h"
 
 class GeigerSensor : public Sensor {
@@ -24,5 +27,7 @@ class GeigerSensor : public Sensor {
   float lastCPS() const { return this->last_cps_; }
   float lastDose() const { return this->last_dose_; }
 };
+
+#endif  // PAYLOAD_ENABLE_GEIGER
 
 #endif

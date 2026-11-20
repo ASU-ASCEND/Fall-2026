@@ -6,20 +6,23 @@
  * minimum_period of 0 ms
  *
  */
-AS7331Sensor::AS7331Sensor(uint8_t i2c_addr) : AS7331Sensor(0, i2c_addr) {}
+AS7331Sensor::AS7331Sensor(uint8_t i2c_addr, TwoWire* bus)
+    : AS7331Sensor(0, i2c_addr, bus) {}
 
 /**
  * @brief Construct a new AS7331Sensor (UVA/B/C Sensor) object
  *
  * @param minium_period Minimum time to wait between readings in ms
  */
-AS7331Sensor::AS7331Sensor(unsigned long minium_period, uint8_t i2c_addr)
+AS7331Sensor::AS7331Sensor(unsigned long minium_period, uint8_t i2c_addr,
+                           TwoWire* bus)
     : Sensor("AS7331" + String(i2c_addr & 0b11),
              "UVA" + String(i2c_addr & 0b11) + "(nm),UVB" +
                  String(i2c_addr & 0b11) + "(nm),UVC" +
                  String(i2c_addr & 0b11) + "(nm),",
              3, minium_period) {
   this->i2c_addr = i2c_addr;
+  this->i2c_bus = bus;
 }
 
 /**
@@ -29,8 +32,12 @@ AS7331Sensor::AS7331Sensor(unsigned long minium_period, uint8_t i2c_addr)
  * @return false never
  */
 bool AS7331Sensor::verify() {
-  STRATOSENSE_I2C.begin();
-  return myUVSensor.begin(this->i2c_addr, STRATOSENSE_I2C);
+  if (!myUVSensor.begin(this->i2c_addr, *this->i2c_bus)) {
+    return false;
+  }
+  // begin() leaves the part in configuration mode; readAllUV() only returns
+  // data in measurement mode. Start continuous conversions.
+  return myUVSensor.prepareMeasurement(MEAS_MODE_CONT, true);
 }
 
 /**
@@ -39,7 +46,7 @@ bool AS7331Sensor::verify() {
  * @return String CSV line - UVA, UVB, UVC,
  */
 String AS7331Sensor::readData() {
-  myUVSensor.readAllUV();
+  if (myUVSensor.readAllUV() != ksfTkErrOk) return this->readEmpty();
 
   float uva = myUVSensor.getUVA();
   float uvb = myUVSensor.getUVB();
@@ -54,7 +61,7 @@ String AS7331Sensor::readData() {
  * @param packet The data packet to write to.
  */
 void AS7331Sensor::readDataPacket(uint8_t*& packet) {
-  myUVSensor.readAllUV();
+  if (myUVSensor.readAllUV() != ksfTkErrOk) return;
 
   float uva = myUVSensor.getUVA();
   float uvb = myUVSensor.getUVB();

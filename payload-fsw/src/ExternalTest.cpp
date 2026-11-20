@@ -12,6 +12,7 @@
 #include <Adafruit_BME680.h>
 #include <Adafruit_BMP3XX.h>
 #include <Adafruit_SHTC3.h>
+#include <DFRobot_OzoneSensor.h>
 #include <SparkFun_AS7331.h>
 #include <SparkFun_ENS160.h>
 #include <SparkFun_TMP117.h>
@@ -27,6 +28,7 @@ const uint8_t ADDR_SHTC3 = 0x70;
 const uint8_t ADDR_BMP390 = 0x76;
 const uint8_t ADDR_BME688 = 0x77;
 const uint8_t ADDR_AS7331 = 0x74;
+const uint8_t ADDR_OZONE = 0x73;
 
 TwoWire& bus = STRATOSENSE_I2C;
 
@@ -173,6 +175,34 @@ void rawProbe() {
     bus.setClock(100000);
   }
 
+  // DFRobot Gravity Ozone Sensor (SEN0321): no ID register. Its address is
+  // 0x70..0x73 via jumpers; this build uses 0x73. Mode register 0x03 reads
+  // 0x00 in active mode and 0x01 in passive mode.
+  if (readRegs(ADDR_OZONE, 0x03, b, 1)) {
+    Serial.printf("[EXT] 0x73 OZONE   ACK mode=0x%02X\n", b[0]);
+  } else if (ping(ADDR_OZONE)) {
+    Serial.println("[EXT] 0x73 OZONE   ACK (mode read failed)");
+  } else {
+    Serial.println("[EXT] 0x73 OZONE   NO ACK");
+  }
+
+  // The new AS7331 breakout is on I2C0 (J202/J203). It shares 0x74 with the
+  // External-board part but lives on the other bus, so probe it separately.
+  {
+    uint8_t regs[4] = {0};
+    STRATOCORE_I2C.beginTransmission(ADDR_AS7331);
+    STRATOCORE_I2C.write((uint8_t)0x00);
+    if (STRATOCORE_I2C.endTransmission(false) == 0 &&
+        STRATOCORE_I2C.requestFrom((int)ADDR_AS7331, 4) == 4) {
+      for (uint8_t i = 0; i < 4; i++) regs[i] = STRATOCORE_I2C.read();
+      Serial.print("[EXT] 0x74 AS7331@I2C0 ACK regs[0..3]=");
+      printHex(regs, 4);
+      Serial.println();
+    } else {
+      Serial.println("[EXT] 0x74 AS7331@I2C0 NO ACK");
+    }
+  }
+
   // AS7331 has no ID register. Report which strap addresses answer and dump
   // the first four config bytes. Only 0x74/0x75 are probed: 0x76/0x77 hold the
   // BMP390 and BME688, and a driver begin() writes config registers.
@@ -202,12 +232,16 @@ struct Devices {
   Adafruit_BMP3XX bmp;
   SparkFun_ENS160 ens;
   SfeAS7331ArdI2C uv;
+  SfeAS7331ArdI2C uv_i2c0;
+  DFRobot_OzoneSensor ozone{&bus};
   bool tmp_ok = false;
   bool shtc_ok = false;
   bool bme_ok = false;
   bool bmp_ok = false;
   bool ens_ok = false;
   bool uv_ok = false;
+  bool uv_i2c0_ok = false;
+  bool ozone_ok = false;
 };
 
 void beginDevices(Devices& d) {
@@ -238,6 +272,15 @@ void beginDevices(Devices& d) {
   }
 
   d.uv_ok = d.uv.begin(ADDR_AS7331, bus);
+  if (d.uv_ok) d.uv.prepareMeasurement(MEAS_MODE_CONT, true);
+  d.uv_i2c0_ok = d.uv_i2c0.begin(ADDR_AS7331, STRATOCORE_I2C);
+  if (d.uv_i2c0_ok)
+    d.uv_i2c0.prepareMeasurement(MEAS_MODE_CONT, true);
+
+  // Ozone is electrochemical and needs a few minutes of bias before the ppb
+  // value is meaningful, so a single pass proves the link, not the calibration.
+  d.ozone_ok = d.ozone.begin(ADDR_OZONE);
+  if (d.ozone_ok) d.ozone.setModes(MEASURE_MODE_PASSIVE);
 }
 
 void printPass(Devices& d) {
@@ -299,6 +342,49 @@ void printPass(Devices& d) {
     } else {
       Serial.printf("  begin OK, read failed");
     }
+  }
+  Serial.println();
+
+  Serial.printf("[EXT] AS7331@I2C0 %s", d.uv_i2c0_ok ? "OK  " : "FAIL");
+  if (d.uv_i2c0_ok) {
+    if (d.uv_i2c0.readAllUV() == ksfTkErrOk) {
+      Serial.printf("  UVA=%.3f UVB=%.3f UVC=%.3f uW/cm2",
+                    d.uv_i2c0.getUVA(), d.uv_i2c0.getUVB(),
+                    d.uv_i2c0.getUVC());
+    } else {
+      Serial.printf("  begin OK, read failed");
+    }
+  }
+  if (d.uv_i2c0_ok) {
+    uint8_t raw[6] = {0};
+    STRATOCORE_I2C.beginTransmission(ADDR_AS7331);
+    STRATOCORE_I2C.write((uint8_t)0x02);
+    if (STRATOCORE_I2C.endTransmission(false) == 0 &&
+        STRATOCORE_I2C.requestFrom((int)ADDR_AS7331, 6) == 6) {
+      for (uint8_t i = 0; i < 6; i++) raw[i] = STRATOCORE_I2C.read();
+      Serial.print("[EXT] AS7331@I2C0 raw=");
+      printHex(raw, 6);
+      Serial.println();
+    }
+    sfe_as7331_reg_meas_osr_status_t st = {};
+    if (d.uv_i2c0.getStatus(st) == ksfTkErrOk) {
+      Serial.printf(
+          "[EXT] AS7331@I2C0 status=0x%04X pd=%u sb=%u nr=%u ndata=%u ldata=%u "
+          "adcof=%u mresof=%u\n",
+          st.word, st.powerstate, st.standbystate, st.notready, st.ndata,
+          st.ldata, st.adcof, st.mresof);
+    }
+    if (d.uv_i2c0.readTemp() == ksfTkErrOk) {
+      Serial.printf("[EXT] AS7331@I2C0 temp=%.2f C\n", d.uv_i2c0.getTemp());
+    } else {
+      Serial.println("[EXT] AS7331@I2C0 temp read failed");
+    }
+  }
+  Serial.println();
+
+  Serial.printf("[EXT] OZONE   %s", d.ozone_ok ? "OK  " : "FAIL");
+  if (d.ozone_ok) {
+    Serial.printf("  %d ppb", d.ozone.readOzoneData());
   }
   Serial.println();
 }

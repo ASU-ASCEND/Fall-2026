@@ -1,0 +1,21 @@
+{
+  "serial_number": "RC-102-006109",
+  "hw_serial_number": "004E002D-4B315015-20353057",
+  "fw_version": "((4, 0, 'Feb  6 2023 15:49:14'), (4, 15, 'Oct 15 2026 10:17:49'))",
+  "status": "status flags: (2,)",
+  "records": 1,
+  "record_kinds": {
+    "RealTimeData": 1
+  },
+  "first_record_utc": "2026-11-13T01:05:42.775628+00:00",
+  "last_record_utc": "2026-11-13T01:05:42.775628+00:00",
+  "spectra": {
+    "current": "rcRC-102-006109_20261113T010542Z.spectrum.current.json",
+    "accum": "rcRC-102-006109_20261113T010542Z.spectrum.accum.json"
+  },
+  "transport": "usb",
+  "files": [
+    "rcRC-102-006109_20261113T010542Z.jsonl",
+    "rcRC-102-006109_20261113T010542Z.csv"
+  ]
+}

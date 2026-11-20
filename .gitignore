@@ -1,1 +1,13 @@
 .DS_Store
+
+__pycache__/
+
+# tio serial logs (see scripts/tio_serial.py)
+logs/
+
+# build artifacts
+.pio/
+
+# local-only bench projects and SD card backups
+esp-checkout-client/
+pnc-sd-backup*/

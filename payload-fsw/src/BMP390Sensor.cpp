@@ -74,17 +74,6 @@ void BMP390Sensor::readDataPacket(uint8_t*& packet) {
     memcpy(packet, &alt, sizeof(alt));
     packet += sizeof(alt);
 
-  } else {
-    double zero = 0;
-    memcpy(packet, &(zero), sizeof(zero));
-    packet += sizeof(zero);
-
-    memcpy(packet, &(zero), sizeof(zero));
-    packet += sizeof(zero);
-
-    float fzero = 0;
-    memcpy(packet, &fzero, sizeof(fzero));
-    packet += sizeof(fzero);
   }
 }
 

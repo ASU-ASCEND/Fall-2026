@@ -3,9 +3,11 @@
 #include "SHTC3Sensor.h"
 #include "TMP11xSensor.h"
 
-extern TMP11xSensor tmp_sensor;
+#if PAYLOAD_ENABLE_EXTERNAL
+// Both live on the External board's I2C bus and are compiled in with it.
 extern TMP11xSensor tmp_sensor_out;
 extern SHTC3Sensor shtc3_sensor_out;
+#endif
 
 /**
  * @brief Construct a new ENS160 Sensor object with default minimum_period of 0
@@ -47,37 +49,17 @@ bool ENS160Sensor::verify() {
 }
 
 void ENS160Sensor::setCompensations() {
-  // set compensation values after read if we have them so that conversion
-  // doesn't slow the read not sure if it actually does but this will let it
-  // take until the next read which should be more than enough time, make sure
-  // that tmp117 and shtc3
-
-  TMP11xSensor* tmp_options[2];
-  SHTC3Sensor* shtc_options[1];
-
-  if (this->i2c_bus == &Wire) {
-    tmp_options[0] = &tmp_sensor;
-    tmp_options[1] = &tmp_sensor_out;
-    shtc_options[0] = &shtc3_sensor_out;
-  } else {
-    tmp_options[0] = &tmp_sensor_out;
-    tmp_options[1] = &tmp_sensor;
-    shtc_options[0] = &shtc3_sensor_out;
+  // Feed the ENS160 the temperature and humidity it uses for its gas
+  // calculations. Both references are the External-board parts; the internal
+  // board has no TMP117 or SHTC3.
+#if PAYLOAD_ENABLE_EXTERNAL
+  if (tmp_sensor_out.getVerified()) {
+    this->ens.setTempCompensation(tmp_sensor_out.getTempC());
   }
-
-  for (int i = 0; i < 2; i++) {
-    if (tmp_options[i]->getVerified()) {
-      this->ens.setTempCompensation(tmp_options[i]->getTempC());
-      break;
-    }
+  if (shtc3_sensor_out.getVerified()) {
+    this->ens.setRHCompensationFloat(shtc3_sensor_out.getRelHum());
   }
-
-  for (int i = 0; i < 1; i++) {
-    if (shtc_options[i]->getVerified()) {
-      this->ens.setRHCompensationFloat(shtc_options[i]->getRelHum());
-      break;
-    }
-  }
+#endif
 }
 
 /**

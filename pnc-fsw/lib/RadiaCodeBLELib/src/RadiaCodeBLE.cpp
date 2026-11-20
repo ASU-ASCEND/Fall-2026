@@ -1,6 +1,13 @@
 #include "RadiacodeBLE.h"
 
+// BENCH DIAGNOSTIC (remove once the RadiaCode link is settled): the BLE
+// library keeps service/characteristic UUIDs behind `protected`, and there is
+// no public accessor, so open them up for one printout.
+#include <Arduino.h>
+#include <list>
+#include <hardware/watchdog.h>
 #include <BLE.h>
+#include <time.h>
 
 // use this to print if 
 #ifndef RC_BLE_DEBUG 
@@ -15,15 +22,30 @@
 #define always_printf(...) Serial.printf(__VA_ARGS__)
 #endif 
 
-#define BLE_RESPONSE_TIMEOUT 10000
+// Keep this well under the 5 s hardware watchdog: a blocked core 0 wait must
+// not outlive it.
+#define BLE_RESPONSE_TIMEOUT 3000
 
 #define RADIACODE_SERVICE_UUID "e63215e5-7003-49d8-96b0-b024798fb901"
 #define RADIACODE_WRITE_FD_UUID "e63215e6-7003-49d8-96b0-b024798fb901"
 #define RADIACODE_NOTIFY_FD_UUID "e63215e7-7003-49d8-96b0-b024798fb901"
 
-static BLEUUID rc_service_uuid(RADIACODE_SERVICE_UUID);
-static BLEUUID rc_write_uuid(RADIACODE_WRITE_FD_UUID);
-static BLEUUID rc_notify_uuid(RADIACODE_NOTIFY_FD_UUID);
+// Build the UUIDs from raw bytes: BLEUUID(String) parses with sscanf("%llx"),
+// which newlib here does not support, so the string form silently ends up as an
+// all-zero UUID and every service/characteristic lookup fails.
+static const uint8_t RC_SERVICE_B[16] = {0xe6, 0x32, 0x15, 0xe5, 0x70, 0x03,
+                                         0x49, 0xd8, 0x96, 0xb0, 0xb0, 0x24,
+                                         0x79, 0x8f, 0xb9, 0x01};
+static const uint8_t RC_WRITE_B[16] = {0xe6, 0x32, 0x15, 0xe6, 0x70, 0x03,
+                                       0x49, 0xd8, 0x96, 0xb0, 0xb0, 0x24,
+                                       0x79, 0x8f, 0xb9, 0x01};
+static const uint8_t RC_NOTIFY_B[16] = {0xe6, 0x32, 0x15, 0xe7, 0x70, 0x03,
+                                        0x49, 0xd8, 0x96, 0xb0, 0xb0, 0x24,
+                                        0x79, 0x8f, 0xb9, 0x01};
+
+static BLEUUID rc_service_uuid(RC_SERVICE_B);
+static BLEUUID rc_write_uuid(RC_WRITE_B);
+static BLEUUID rc_notify_uuid(RC_NOTIFY_B);
 
 static BLERemoteCharacteristic* rc_write_char;
 static BLERemoteCharacteristic* rc_notify_char;
@@ -51,6 +73,7 @@ static void notify(BLERemoteCharacteristic* c, const uint8_t* data,
   // }
 
   if (_resp_size == 0) {
+    if (len < 4) return;  // short notification: not a response header
     // read first 4 bytes as signed integer
     int size_buf;
     memcpy(&size_buf, data, sizeof(int));
@@ -89,6 +112,10 @@ static BytesBuffer* ble_execute(uint8_t* data, size_t len) {
 
   uint32_t start_time = millis();
   while (_response_ready == false) {
+    // This used to be a tight, unfed spin. Feed the hardware watchdog and
+    // yield so a slow BLE response cannot trip the 5 s WDT.
+    watchdog_update();
+    delay(1);
     if (millis() - start_time > BLE_RESPONSE_TIMEOUT) {
       Serial.println("timeout");
       return nullptr;
@@ -180,14 +207,30 @@ void radiacode_ble_init(){
 uint8_t radiacode_ble_connect(String target_mac, bool verbose) {
   if (verbose) debug_printf("Scanning...\n");
 
-  BLEScanReport* res = BLE.scan();
+  // 2 s, not the 5 s default: the default scan is exactly the hardware
+  // watchdog interval, so a slow scan left nothing for the feed path.
+  BLEScanReport* res = BLE.scan(2);
+
 
   for (BLEAdvertising item : *res) {
     if (item.getAddress().toString() == target_mac) {
       if (verbose) debug_printf("Found device, connecting...\n");
-      if (BLE.client()->connect(item) == false) {
-        if (verbose) debug_printf("Failed.\n");
-        return 1; 
+      // GATT discovery right after the link comes up sometimes returns an
+      // empty service list; drop the link and try again.
+      for (int attempt = 0; attempt < 3; attempt++) {
+        if (BLE.client()->connect(item) == false) {
+          if (verbose) debug_printf("Failed.\n");
+          return 1;
+        }
+        if (!BLE.client()->services()->empty()) {
+          break;
+        }
+        if (verbose) {
+          debug_printf("No services discovered (attempt %u), retrying\n",
+                       (unsigned)(attempt + 1));
+        }
+        BLE.client()->disconnect();
+        delay(750);
       }
       break;
     }
@@ -196,7 +239,27 @@ uint8_t radiacode_ble_connect(String target_mac, bool verbose) {
   if (verbose) debug_printf("Done.\n");
 
   if (verbose) debug_printf("Exploring service...\n");
+  BLERemoteServiceList* services = BLE.client()->services();
+  if (verbose) {
+    debug_printf("Services discovered: %u\n",
+                 (unsigned)(services ? services->size() : 0));
+  }
   BLERemoteService* service = BLE.client()->service(rc_service_uuid);
+
+  // Some RadiaCode firmware revisions advertise the custom service but the
+  // UUID compare fails here (or the service is only listed in the scan
+  // response). Fall back to whichever service actually carries the RadiaCode
+  // write/notify pair.
+  if (!service && services) {
+    for (BLERemoteService* candidate : *services) {
+      if (candidate->characteristic(rc_write_uuid) &&
+          candidate->characteristic(rc_notify_uuid)) {
+        service = candidate;
+        if (verbose) debug_printf("Service matched by characteristics\n");
+        break;
+      }
+    }
+  }
 
   if (service) {
     rc_notify_char = service->characteristic(rc_notify_uuid);
@@ -217,6 +280,8 @@ uint8_t radiacode_ble_connect(String target_mac, bool verbose) {
 
   } else {
     if (verbose) debug_printf("RCError on service\n");
+    // Leave the device free for the next attempt: it only serves one link.
+    BLE.client()->disconnect();
     return 4; 
   }
 
@@ -258,8 +323,28 @@ uint8_t write_request(int command_id, uint8_t* data, size_t len) {
   return 0; 
 }
 
-BytesBuffer* read_request(uint32_t command_id) {
-  // Serial.println("read_request");
+/**
+ * @brief Set the device clock from a UTC epoch.
+ *
+ * The RadiaCode timestamps its internal log with its own clock, so this is the
+ * only thing a flight needs to do to it: match the PnC's UTC time authority.
+ * Payload is day, month, year-2000, weekday(ignored), second, minute, hour, 0.
+ */
+uint8_t radiacode_set_time(uint32_t unix_s) {
+  time_t t = (time_t)unix_s;
+  struct tm tmv = {};
+  gmtime_r(&t, &tmv);
+
+  uint8_t d[8] = {(uint8_t)tmv.tm_mday, (uint8_t)(tmv.tm_mon + 1),
+                  (uint8_t)((tmv.tm_year + 1900) % 100), 0,
+                  (uint8_t)tmv.tm_sec, (uint8_t)tmv.tm_min,
+                  (uint8_t)tmv.tm_hour, 0};
+
+  BytesBuffer* r = execute(Command::SET_TIME, d, sizeof(d));
+  return (r == nullptr) ? 1 : 0;
+}
+
+BytesBuffer* read_request(uint32_t command_id) {  // Serial.println("read_request");
   BytesBuffer* r =
       execute(Command::RD_VIRT_STRING, (uint8_t*)&command_id, sizeof(int));
 
